@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Optional
 import time
 import uuid
 
-from db.vector_db import QdrantClient
+from db.vector_db import SQLiteVectorStore
 from config import LLM_MODELS
 
 logger = logging.getLogger("memory_engine")
@@ -14,7 +14,7 @@ class MemoryEngine:
     
     def __init__(self):
         # Inicializar cliente Qdrant
-        self.db_client = QdrantClient()
+        self.db_client = SQLiteVectorStore()
         
         # Inicializar adaptador de embeddings
         self.embedding_model = None

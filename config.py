@@ -43,11 +43,10 @@ PI_CONFIG = {
     "reconnect_interval": 5  # segundos
 }
 
-# Configurações do Qdrant
-QDRANT_CONFIG = {
-    "url": "http://localhost:6333",
+VECTOR_DB_CONFIG = {
+    "db_path": "db/memory.db",
     "collection_name": "car_memory",
-    "vector_size": 768  # Tamanho do embedding
+    "vector_size": 768
 }
 
 # Configurações de personalidade
