@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 import asyncio
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import threading
 import logging
 import argparse
 import os
-
+import time
 from config import SERVER_CONFIG
 from server.api_router import setup_routes
 from server.command_center import CommandCenter
 from interface.gradio_ui import create_interface
+from mqtt_handler import MQTTHandler
+
+
 
 # Configuração de logging
 logging.basicConfig(
@@ -41,6 +44,9 @@ command_center = CommandCenter()
 
 # Configurar rotas da API
 setup_routes(app, command_center)
+
+mqtt_handler = MQTTHandler(command_center)
+mqtt_handler.start()
 
 # Função para iniciar o servidor FastAPI
 def start_fastapi():
@@ -78,3 +84,22 @@ if __name__ == "__main__":
             asyncio.get_event_loop().run_forever()
         except KeyboardInterrupt:
             logger.info("Encerrando aplicação...")
+
+def publish_telemetry():
+    while True:
+        try:
+            # Collect telemetry data
+            telemetry = {
+                "battery": command_center.system_status.get("battery_level"),
+                "sensors": command_center.system_status.get("sensors", {}),
+                "camera_active": command_center.system_status.get("camera_active"),
+            }
+            mqtt_handler.publish_telemetry(telemetry)
+        except Exception as e:
+            logger.error(f"Error in telemetry publishing: {e}")
+        time.sleep(1)  # Publish every second
+
+# Start telemetry thread
+telemetry_thread = threading.Thread(target=publish_telemetry)
+telemetry_thread.daemon = True
+telemetry_thread.start()
