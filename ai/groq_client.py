@@ -68,7 +68,7 @@ class GroqVisionClient:
             raise ValueError("GROQ_API_KEY não encontrada. Configure no .env ou passe como parâmetro")
         
         self.api_url = "https://api.groq.com/openai/v1/chat/completions"
-        self.model = "llama-3.2-90b-vision-preview"
+        self.model = "meta-llama/llama-4-scout-17b-16e-instruct"
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
