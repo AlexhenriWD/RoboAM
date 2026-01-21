@@ -1,0 +1,791 @@
+#!/usr/bin/env python3
+"""
+Servidor Web para controle do Freenove Smart Car
+Substitui o sistema PyQt5 por uma interface web acessível remotamente
+"""
+
+from flask import Flask, render_template, Response, jsonify, request
+from flask_socketio import SocketIO, emit
+import threading
+import time
+import json
+from pathlib import Path
+
+# Importar módulos do hardware
+from hardware.motor import Ordinary_Car
+from hardware.servo import Servo
+from hardware.ultrasonic import Ultrasonic
+from hardware.infrared import Infrared
+from hardware.adc import ADC
+from hardware.buzzer import Buzzer
+
+# Tentar importar opencv (opcional para câmera)
+try:
+    import cv2
+    CAMERA_AVAILABLE = True
+except ImportError:
+    print("AVISO: OpenCV não disponível. Câmera desabilitada.")
+    CAMERA_AVAILABLE = False
+
+# Tentar importar LED (opcional)
+try:
+    from led import Led
+    LED_AVAILABLE = True
+except ImportError as e:
+    print(f"AVISO: LED não disponível: {e}")
+    print("O servidor funcionará sem suporte a LEDs.")
+    LED_AVAILABLE = False
+    class Led:
+        """Classe mock para LED quando o módulo não está disponível"""
+        def __init__(self):
+            self.is_support_led_function = False
+        def colorBlink(self, *args, **kwargs):
+            pass
+        def rainbowCycle(self, *args, **kwargs):
+            pass
+        def rainbowbreathing(self, *args, **kwargs):
+            pass
+        def following(self, *args, **kwargs):
+            pass
+        def ledIndex(self, *args, **kwargs):
+            pass
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'freenove-secret-key-2026'
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+class RobotController:
+    def __init__(self):
+        """Inicializa todos os componentes do robô"""
+        self.running = False
+        self.camera = None
+        self.motor = None
+        self.servo = None
+        self.ultrasonic = None
+        self.infrared = None
+        self.adc = None
+        self.buzzer = None
+        self.led = None
+        self.led_available = LED_AVAILABLE
+        self.camera_available = CAMERA_AVAILABLE
+        
+        # Estados
+        self.car_mode = 'manual'  # manual, ultrasonic, infrared, light
+        self.led_mode = 'off'
+        self.camera_active = False
+        
+        # Threads
+        self.sensor_thread = None
+        self.led_thread = None
+        self.auto_mode_thread = None
+        
+        self.initialize_hardware()
+    
+    def initialize_hardware(self):
+        """Inicializa o hardware do robô"""
+        try:
+            print("Inicializando hardware...")
+            self.motor = Ordinary_Car()
+            print("✓ Motor inicializado")
+            
+            self.servo = Servo()
+            print("✓ Servo inicializado")
+            
+            self.ultrasonic = Ultrasonic()
+            print("✓ Ultrasonic inicializado")
+            
+            self.infrared = Infrared()
+            print("✓ Infrared inicializado")
+            
+            self.adc = ADC()
+            print("✓ ADC inicializado")
+            
+            self.buzzer = Buzzer()
+            print("✓ Buzzer inicializado")
+            
+            # Inicializar LED se disponível
+            if self.led_available:
+                try:
+                    self.led = Led()
+                    print("✓ LED inicializado")
+                except Exception as e:
+                    print(f"✗ LED falhou: {e}")
+                    self.led_available = False
+                    self.led = Led()  # Usar versão mock
+            else:
+                self.led = Led()  # Usar versão mock
+                print("○ LED não disponível (modo mock)")
+            
+            # Inicializar webcam USB se OpenCV disponível
+            if self.camera_available:
+                try:
+                    self.camera = cv2.VideoCapture(0)
+                    if self.camera.isOpened():
+                        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                        self.camera.set(cv2.CAP_PROP_FPS, 30)
+                        print("✓ Câmera inicializada")
+                    else:
+                        print("○ Câmera não detectada")
+                        self.camera = None
+                        self.camera_available = False
+                except Exception as e:
+                    print(f"✗ Câmera falhou: {e}")
+                    self.camera = None
+                    self.camera_available = False
+            else:
+                print("○ OpenCV não disponível - câmera desabilitada")
+            
+            self.running = True
+            print("\n✓ Hardware inicializado com sucesso!")
+            
+            # Iniciar threads de monitoramento
+            self.start_monitoring_threads()
+            
+        except Exception as e:
+            print(f"✗ Erro ao inicializar hardware: {e}")
+            self.cleanup()
+            raise
+    
+    def start_monitoring_threads(self):
+        """Inicia threads de monitoramento de sensores"""
+        self.sensor_thread = threading.Thread(target=self.sensor_monitor_loop, daemon=True)
+        self.sensor_thread.start()
+        
+        if self.led_available:
+            self.led_thread = threading.Thread(target=self.led_loop, daemon=True)
+            self.led_thread.start()
+        
+        self.auto_mode_thread = threading.Thread(target=self.auto_mode_loop, daemon=True)
+        self.auto_mode_thread.start()
+    
+    def sensor_monitor_loop(self):
+        """Loop de monitoramento contínuo dos sensores"""
+        while self.running:
+            try:
+                # Ler sensores
+                data = {
+                    'ultrasonic': round(self.ultrasonic.get_distance() or 0, 2),
+                    'infrared': [
+                        self.infrared.read_one_infrared(1),
+                        self.infrared.read_one_infrared(2),
+                        self.infrared.read_one_infrared(3)
+                    ],
+                    'light_left': round(self.adc.read_adc(0), 2),
+                    'light_right': round(self.adc.read_adc(1), 2),
+                    'battery': round(self.adc.read_adc(2) * (3 if self.adc.pcb_version == 1 else 2), 2),
+                    'mode': self.car_mode,
+                    'led_available': self.led_available,
+                    'camera_available': self.camera_available
+                }
+                
+                # Enviar dados via SocketIO
+                socketio.emit('sensor_data', data)
+                
+                time.sleep(0.2)
+            except Exception as e:
+                print(f"Erro no loop de sensores: {e}")
+                time.sleep(0.5)
+    
+    def led_loop(self):
+        """Loop de controle dos LEDs"""
+        while self.running and self.led_available:
+            try:
+                if self.led_mode == 'rainbow':
+                    self.led.rainbowCycle(20)
+                elif self.led_mode == 'breathing':
+                    self.led.rainbowbreathing(10)
+                elif self.led_mode == 'following':
+                    self.led.following(50)
+                elif self.led_mode == 'blink':
+                    self.led.colorBlink(1, 300)
+                elif self.led_mode == 'off':
+                    self.led.colorBlink(0)
+                    time.sleep(0.1)
+                else:
+                    time.sleep(0.05)
+            except Exception as e:
+                print(f"Erro no loop de LED: {e}")
+                time.sleep(0.5)
+    
+    def auto_mode_loop(self):
+        """Loop para modos automáticos"""
+        while self.running:
+            try:
+                if self.car_mode == 'ultrasonic':
+                    self.ultrasonic_mode()
+                elif self.car_mode == 'infrared':
+                    self.infrared_mode()
+                elif self.car_mode == 'light':
+                    self.light_mode()
+                else:
+                    time.sleep(0.1)
+            except Exception as e:
+                print(f"Erro no modo automático: {e}")
+                time.sleep(0.5)
+    
+    def ultrasonic_mode(self):
+        """Modo de navegação por ultrassom"""
+        servo_angle = 90
+        servo_dir = 1
+        distances = [30, 30, 30]
+        
+        self.servo.set_servo_pwm('0', servo_angle)
+        time.sleep(0.2)
+        
+        if servo_angle == 30:
+            distances[0] = self.ultrasonic.get_distance() or 30
+        elif servo_angle == 90:
+            distances[1] = self.ultrasonic.get_distance() or 30
+        elif servo_angle == 150:
+            distances[2] = self.ultrasonic.get_distance() or 30
+        
+        # Lógica de navegação
+        if (distances[0] < 30 and distances[1] < 30 and distances[2] < 30) or distances[1] < 30:
+            self.motor.set_motor_model(-1450, -1450, -1450, -1450)
+            time.sleep(0.1)
+            if distances[0] < distances[2]:
+                self.motor.set_motor_model(1450, 1450, -1450, -1450)
+            else:
+                self.motor.set_motor_model(-1450, -1450, 1450, 1450)
+        elif distances[0] < 20:
+            self.motor.set_motor_model(2000, 2000, -500, -500)
+        elif distances[2] < 20:
+            self.motor.set_motor_model(-500, -500, 2000, 2000)
+        else:
+            self.motor.set_motor_model(600, 600, 600, 600)
+        
+        # Atualizar ângulo do servo
+        if servo_angle <= 30:
+            servo_dir = 1
+        elif servo_angle >= 150:
+            servo_dir = 0
+        
+        servo_angle += 60 if servo_dir == 1 else -60
+    
+    def infrared_mode(self):
+        """Modo de seguir linha"""
+        ir_value = self.infrared.read_all_infrared()
+        
+        if ir_value == 2:
+            self.motor.set_motor_model(800, 800, 800, 800)
+        elif ir_value == 4:
+            self.motor.set_motor_model(-1500, -1500, 2500, 2500)
+        elif ir_value == 6:
+            self.motor.set_motor_model(-2000, -2000, 4000, 4000)
+        elif ir_value == 1:
+            self.motor.set_motor_model(2500, 2500, -1500, -1500)
+        elif ir_value == 3:
+            self.motor.set_motor_model(4000, 4000, -2000, -2000)
+        elif ir_value == 7:
+            self.motor.set_motor_model(0, 0, 0, 0)
+        
+        time.sleep(0.2)
+    
+    def light_mode(self):
+        """Modo de seguir luz"""
+        L = self.adc.read_adc(0)
+        R = self.adc.read_adc(1)
+        
+        if L < 2.99 and R < 2.99:
+            self.motor.set_motor_model(600, 600, 600, 600)
+        elif abs(L - R) < 0.15:
+            self.motor.set_motor_model(0, 0, 0, 0)
+        elif L > 3 or R > 3:
+            if L > R:
+                self.motor.set_motor_model(-1200, -1200, 1400, 1400)
+            else:
+                self.motor.set_motor_model(1400, 1400, -1200, -1200)
+        
+        time.sleep(0.2)
+    
+    def get_camera_frame(self):
+        """Captura frame da webcam"""
+        if self.camera_available and self.camera and self.camera.isOpened():
+            ret, frame = self.camera.read()
+            if ret:
+                # Redimensionar para performance
+                frame = cv2.resize(frame, (640, 480))
+                return frame
+        return None
+    
+    def cleanup(self):
+        """Limpa recursos"""
+        print("\nLimpando recursos...")
+        self.running = False
+        
+        if self.motor:
+            self.motor.set_motor_model(0, 0, 0, 0)
+            self.motor.close()
+            print("✓ Motor desligado")
+        
+        if self.camera_available and self.camera and self.camera.isOpened():
+            self.camera.release()
+            print("✓ Câmera liberada")
+        
+        if self.ultrasonic:
+            self.ultrasonic.close()
+            print("✓ Ultrasonic fechado")
+        
+        if self.infrared:
+            self.infrared.close()
+            print("✓ Infrared fechado")
+        
+        if self.adc:
+            self.adc.close_i2c()
+            print("✓ ADC fechado")
+        
+        if self.buzzer:
+            self.buzzer.close()
+            print("✓ Buzzer fechado")
+        
+        if self.led and self.led_available:
+            self.led.colorBlink(0)
+            print("✓ LED desligado")
+
+# Instância global do controlador
+robot = None
+
+def init_robot():
+    """Inicializa o robô"""
+    global robot
+    if robot is None:
+        robot = RobotController()
+    return robot
+
+# Rotas Flask
+@app.route('/')
+def index():
+    """Página principal"""
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Freenove Smart Car</title>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { 
+                font-family: 'Segoe UI', Arial, sans-serif; 
+                background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+                color: #fff; 
+                min-height: 100vh;
+                padding: 20px;
+            }
+            .container { 
+                max-width: 1200px; 
+                margin: 0 auto; 
+            }
+            h1 { 
+                color: #00ff88; 
+                text-align: center;
+                margin-bottom: 30px;
+                text-shadow: 0 0 20px rgba(0,255,136,0.5);
+            }
+            .grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+                gap: 20px;
+                margin-bottom: 20px;
+            }
+            .card { 
+                background: rgba(255,255,255,0.05);
+                backdrop-filter: blur(10px);
+                padding: 20px; 
+                border-radius: 15px; 
+                border: 1px solid rgba(255,255,255,0.1);
+                box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+            }
+            .card h3 {
+                color: #00d4ff;
+                margin-bottom: 15px;
+                border-bottom: 2px solid rgba(0,212,255,0.3);
+                padding-bottom: 10px;
+            }
+            .sensor-value {
+                font-size: 24px;
+                font-weight: bold;
+                color: #00ff88;
+                margin: 10px 0;
+            }
+            .controls {
+                display: grid;
+                grid-template-columns: repeat(2, 1fr);
+                gap: 10px;
+            }
+            button { 
+                padding: 15px 20px; 
+                font-size: 16px; 
+                cursor: pointer; 
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                border: none;
+                border-radius: 10px;
+                transition: all 0.3s;
+                font-weight: bold;
+            }
+            button:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 5px 20px rgba(102,126,234,0.4);
+            }
+            button:active {
+                transform: translateY(0);
+            }
+            button.active {
+                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            }
+            input[type="range"] {
+                -webkit-appearance: none;
+                appearance: none;
+                height: 8px;
+                background: rgba(255,255,255,0.1);
+                border-radius: 5px;
+                outline: none;
+            }
+            input[type="range"]::-webkit-slider-thumb {
+                -webkit-appearance: none;
+                appearance: none;
+                width: 20px;
+                height: 20px;
+                background: #667eea;
+                border-radius: 50%;
+                cursor: pointer;
+            }
+            input[type="range"]::-moz-range-thumb {
+                width: 20px;
+                height: 20px;
+                background: #667eea;
+                border-radius: 50%;
+                cursor: pointer;
+                border: none;
+            }
+            .status-indicator {
+                display: inline-block;
+                width: 12px;
+                height: 12px;
+                border-radius: 50%;
+                background: #00ff88;
+                margin-right: 8px;
+                animation: pulse 2s infinite;
+            }
+            @keyframes pulse {
+                0%, 100% { opacity: 1; }
+                50% { opacity: 0.5; }
+            }
+            .info { color: #00d4ff; }
+            .warning { color: #ffd700; }
+            #video {
+                width: 100%;
+                border-radius: 10px;
+                border: 2px solid rgba(255,255,255,0.1);
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🤖 Freenove Smart Car - Web Control</h1>
+            
+            <div class="grid">
+                <div class="card">
+                    <h3><span class="status-indicator"></span>Status do Sistema</h3>
+                    <p id="connection-status" class="info">Conectando...</p>
+                    <p>Bateria: <span id="battery" class="sensor-value">--</span>V</p>
+                    <p>Modo: <span id="mode" class="sensor-value">--</span></p>
+                </div>
+                
+                <div class="card">
+                    <h3>📡 Sensores</h3>
+                    <p>Ultrassom: <span id="ultrasonic" class="sensor-value">--</span>cm</p>
+                    <p>Luz Esq: <span id="light-left" class="sensor-value">--</span>V</p>
+                    <p>Luz Dir: <span id="light-right" class="sensor-value">--</span>V</p>
+                </div>
+                
+                <div class="card">
+                    <h3>🎮 Modos de Controle</h3>
+                    <div class="controls">
+                        <button onclick="setMode('manual')" id="btn-manual">Manual</button>
+                        <button onclick="setMode('ultrasonic')" id="btn-ultrasonic">Ultrassom</button>
+                        <button onclick="setMode('infrared')" id="btn-infrared">Linha</button>
+                        <button onclick="setMode('light')" id="btn-light">Luz</button>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3>💡 LEDs</h3>
+                    <div class="controls">
+                        <button onclick="setLed('off')" id="btn-led-off">Desligar</button>
+                        <button onclick="setLed('rainbow')" id="btn-led-rainbow">Arco-íris</button>
+                        <button onclick="setLed('breathing')" id="btn-led-breathing">Respiração</button>
+                        <button onclick="setLed('blink')" id="btn-led-blink">Piscar</button>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3>🕹️ Controle Manual</h3>
+                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 300px; margin: 0 auto;">
+                    <div></div>
+                    <button onmousedown="move('forward')" onmouseup="stop()" ontouchstart="move('forward')" ontouchend="stop()">⬆️<br>Frente</button>
+                    <div></div>
+                    
+                    <button onmousedown="move('left')" onmouseup="stop()" ontouchstart="move('left')" ontouchend="stop()">⬅️<br>Esq</button>
+                    <button onclick="stop()" style="background: #dc3545;">⏹️<br>Parar</button>
+                    <button onmousedown="move('right')" onmouseup="stop()" ontouchstart="move('right')" ontouchend="stop()">➡️<br>Dir</button>
+                    
+                    <div></div>
+                    <button onmousedown="move('backward')" onmouseup="stop()" ontouchstart="move('backward')" ontouchend="stop()">⬇️<br>Trás</button>
+                    <div></div>
+                </div>
+                <div style="margin-top: 15px;">
+                    <label>Velocidade: <span id="speed-value">50</span>%</label>
+                    <input type="range" id="speed" min="0" max="100" value="50" style="width: 100%;" oninput="updateSpeed(this.value)">
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3>📹 Câmera</h3>
+                <button onclick="toggleCamera()" id="btn-camera">Ativar Câmera</button>
+                <div style="margin-top: 15px;">
+                    <img id="video" src="" style="display:none;">
+                </div>
+            </div>
+        </div>
+        
+        <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+        <script>
+            const socket = io();
+            let cameraActive = false;
+            let currentMode = 'manual';
+            let currentLed = 'off';
+            let speedMultiplier = 0.5; // 50% inicial
+            
+            socket.on('connect', () => {
+                document.getElementById('connection-status').innerHTML = '✓ Conectado ao robô!';
+                document.getElementById('connection-status').className = 'info';
+            });
+            
+            socket.on('disconnect', () => {
+                document.getElementById('connection-status').innerHTML = '✗ Desconectado';
+                document.getElementById('connection-status').className = 'warning';
+            });
+            
+            socket.on('sensor_data', (data) => {
+                document.getElementById('battery').textContent = data.battery || '--';
+                document.getElementById('ultrasonic').textContent = data.ultrasonic || '--';
+                document.getElementById('light-left').textContent = data.light_left?.toFixed(2) || '--';
+                document.getElementById('light-right').textContent = data.light_right?.toFixed(2) || '--';
+                document.getElementById('mode').textContent = data.mode || '--';
+                
+                // Atualizar botão ativo
+                document.querySelectorAll('.controls button').forEach(b => b.classList.remove('active'));
+                const modeBtn = document.getElementById('btn-' + data.mode);
+                if (modeBtn) modeBtn.classList.add('active');
+            });
+            
+            socket.on('status', (data) => {
+                console.log(data.message);
+            });
+            
+            function setMode(mode) {
+                socket.emit('car_mode', { mode: mode });
+                currentMode = mode;
+            }
+            
+            function updateSpeed(value) {
+                speedMultiplier = value / 100;
+                document.getElementById('speed-value').textContent = value;
+            }
+            
+            function move(direction) {
+                if (currentMode !== 'manual') return;
+                
+                const baseSpeed = 2000;
+                const speed = Math.round(baseSpeed * speedMultiplier);
+                
+                let fl = 0, bl = 0, fr = 0, br = 0;
+                
+                switch(direction) {
+                    case 'forward':
+                        fl = bl = fr = br = speed;
+                        break;
+                    case 'backward':
+                        fl = bl = fr = br = -speed;
+                        break;
+                    case 'left':
+                        fl = bl = -speed;
+                        fr = br = speed;
+                        break;
+                    case 'right':
+                        fl = bl = speed;
+                        fr = br = -speed;
+                        break;
+                }
+                
+                socket.emit('motor_control', { fl, bl, fr, br });
+            }
+            
+            function stop() {
+                socket.emit('motor_control', { fl: 0, bl: 0, fr: 0, br: 0 });
+            }
+            
+            function setLed(mode) {
+                socket.emit('led_mode', { mode: mode });
+                currentLed = mode;
+                document.querySelectorAll('[id^="btn-led-"]').forEach(b => b.classList.remove('active'));
+                document.getElementById('btn-led-' + mode).classList.add('active');
+            }
+            
+            function toggleCamera() {
+                cameraActive = !cameraActive;
+                socket.emit('camera_toggle', { active: cameraActive });
+                const video = document.getElementById('video');
+                const btn = document.getElementById('btn-camera');
+                
+                if (cameraActive) {
+                    video.src = '/video_feed';
+                    video.style.display = 'block';
+                    btn.textContent = 'Desativar Câmera';
+                    btn.classList.add('active');
+                } else {
+                    video.src = '';
+                    video.style.display = 'none';
+                    btn.textContent = 'Ativar Câmera';
+                    btn.classList.remove('active');
+                }
+            }
+            
+            // Marcar modo manual como ativo ao carregar
+            document.getElementById('btn-manual').classList.add('active');
+            document.getElementById('btn-led-off').classList.add('active');
+        </script>
+    </body>
+    </html>
+    """
+    return html
+
+@app.route('/video_feed')
+def video_feed():
+    """Stream de vídeo"""
+    def generate():
+        while True:
+            if robot and robot.camera_active and robot.camera_available:
+                frame = robot.get_camera_frame()
+                if frame is not None:
+                    ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    if ret:
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+            time.sleep(0.03)  # ~30 fps
+    
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+# SocketIO eventos
+@socketio.on('connect')
+def handle_connect():
+    """Cliente conectado"""
+    print('Cliente conectado')
+    emit('status', {
+        'message': 'Conectado ao robô',
+        'led_available': robot.led_available if robot else False,
+        'camera_available': robot.camera_available if robot else False
+    })
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Cliente desconectado"""
+    print('Cliente desconectado')
+    if robot:
+        robot.motor.set_motor_model(0, 0, 0, 0)
+
+@socketio.on('motor_control')
+def handle_motor(data):
+    """Controle do motor"""
+    if robot and robot.car_mode == 'manual':
+        try:
+            fl = int(data.get('fl', 0))
+            bl = int(data.get('bl', 0))
+            fr = int(data.get('fr', 0))
+            br = int(data.get('br', 0))
+            robot.motor.set_motor_model(fl, bl, fr, br)
+        except Exception as e:
+            print(f"Erro no controle do motor: {e}")
+
+@socketio.on('servo_control')
+def handle_servo(data):
+    """Controle do servo"""
+    if robot:
+        try:
+            servo_id = str(data.get('id', '0'))
+            angle = int(data.get('angle', 90))
+            robot.servo.set_servo_pwm(servo_id, angle)
+        except Exception as e:
+            print(f"Erro no controle do servo: {e}")
+
+@socketio.on('buzzer_control')
+def handle_buzzer(data):
+    """Controle do buzzer"""
+    if robot:
+        try:
+            state = bool(data.get('state', False))
+            robot.buzzer.set_state(state)
+        except Exception as e:
+            print(f"Erro no controle do buzzer: {e}")
+
+@socketio.on('led_mode')
+def handle_led_mode(data):
+    """Modo de LED"""
+    if robot:
+        if not robot.led_available:
+            emit('status', {'message': 'LED não disponível neste sistema'})
+            return
+        try:
+            mode = data.get('mode', 'off')
+            robot.led_mode = mode
+            emit('status', {'message': f'Modo LED: {mode}'})
+        except Exception as e:
+            print(f"Erro no modo LED: {e}")
+
+@socketio.on('car_mode')
+def handle_car_mode(data):
+    """Modo do carro"""
+    if robot:
+        try:
+            mode = data.get('mode', 'manual')
+            robot.car_mode = mode
+            if mode == 'manual':
+                robot.motor.set_motor_model(0, 0, 0, 0)
+            emit('status', {'message': f'Modo do carro: {mode}'})
+        except Exception as e:
+            print(f"Erro no modo do carro: {e}")
+
+@socketio.on('camera_toggle')
+def handle_camera(data):
+    """Toggle da câmera"""
+    if robot:
+        if not robot.camera_available:
+            emit('status', {'message': 'Câmera não disponível'})
+            return
+        try:
+            robot.camera_active = bool(data.get('active', False))
+            emit('status', {'message': f'Câmera: {"Ativa" if robot.camera_active else "Inativa"}'})
+        except Exception as e:
+            print(f"Erro no toggle da câmera: {e}")
+
+if __name__ == '__main__':
+    try:
+        print("=" * 60)
+        print("Iniciando servidor web do Freenove Smart Car...")
+        print("=" * 60)
+        init_robot()
+        print("\n" + "=" * 60)
+        print("✓ Robô inicializado!")
+        print("✓ Acesse http://<IP_DA_RASPBERRY>:5000")
+        print("=" * 60 + "\n")
+        socketio.run(app, host='0.0.0.0', port=5000, debug=False)
+    except KeyboardInterrupt:
+        print("\n\nEncerrando servidor...")
+    finally:
+        if robot:
+            robot.cleanup()
+        print("\n✓ Servidor encerrado com sucesso!")
