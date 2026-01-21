@@ -1,42 +1,49 @@
 #!/usr/bin/env python3
 """
-Servidor Web para controle do Freenove Smart Car
-Substitui o sistema PyQt5 por uma interface web acessível remotamente
+Servidor Web para controle do Freenove Smart Car com IA
+Versão melhorada com integração Groq AI
 """
 
-from flask import Flask, render_template, Response, jsonify, request
+from flask import Flask, render_template_string, Response, jsonify, request
 from flask_socketio import SocketIO, emit
 import threading
 import time
 import json
+import sys
 from pathlib import Path
 
+# Adicionar pasta hardware ao path
+sys.path.insert(0, str(Path(__file__).parent / 'hardware'))
+
 # Importar módulos do hardware
-from hardware.motor import Ordinary_Car
-from hardware.servo import Servo
-from hardware.ultrasonic import Ultrasonic
-from hardware.infrared import Infrared
-from hardware.adc import ADC
-from hardware.buzzer import Buzzer
+try:
+    from hardware.motor import Ordinary_Car
+    from hardware.servo import Servo
+    from hardware.ultrasonic import Ultrasonic
+    from hardware.infrared import Infrared
+    from hardware.adc import ADC
+    from hardware.buzzer import Buzzer
+    HARDWARE_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️ Erro ao importar hardware: {e}")
+    HARDWARE_AVAILABLE = False
 
 # Tentar importar opencv (opcional para câmera)
 try:
     import cv2
     CAMERA_AVAILABLE = True
 except ImportError:
-    print("AVISO: OpenCV não disponível. Câmera desabilitada.")
+    print("⚠️ OpenCV não disponível. Câmera desabilitada.")
     CAMERA_AVAILABLE = False
 
 # Tentar importar LED (opcional)
 try:
     from led import Led
     LED_AVAILABLE = True
-except ImportError as e:
-    print(f"AVISO: LED não disponível: {e}")
-    print("O servidor funcionará sem suporte a LEDs.")
+except ImportError:
+    print("⚠️ LED não disponível")
     LED_AVAILABLE = False
     class Led:
-        """Classe mock para LED quando o módulo não está disponível"""
         def __init__(self):
             self.is_support_led_function = False
         def colorBlink(self, *args, **kwargs):
@@ -49,6 +56,14 @@ except ImportError as e:
             pass
         def ledIndex(self, *args, **kwargs):
             pass
+
+# Importar cliente IA
+try:
+    from ai.groq_client import GroqVisionClient
+    AI_AVAILABLE = True
+except ImportError:
+    print("⚠️ Groq AI não disponível")
+    AI_AVAILABLE = False
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'freenove-secret-key-2026'
@@ -66,23 +81,42 @@ class RobotController:
         self.adc = None
         self.buzzer = None
         self.led = None
+        self.groq_client = None
+        
         self.led_available = LED_AVAILABLE
         self.camera_available = CAMERA_AVAILABLE
+        self.ai_available = AI_AVAILABLE
         
         # Estados
-        self.car_mode = 'manual'  # manual, ultrasonic, infrared, light
+        self.car_mode = 'manual'  # manual, ultrasonic, infrared, light, ai, ai_vision
         self.led_mode = 'off'
         self.camera_active = False
+        self.ai_enabled = False
         
         # Threads
         self.sensor_thread = None
         self.led_thread = None
         self.auto_mode_thread = None
+        self.ai_thread = None
+        
+        # Dados
+        self.current_frame = None
+        self.sensor_data = {}
+        self.last_ai_decision = None
+        self.ai_stats = {
+            'decisions': 0,
+            'errors': 0,
+            'last_decision_time': 0
+        }
         
         self.initialize_hardware()
     
     def initialize_hardware(self):
         """Inicializa o hardware do robô"""
+        if not HARDWARE_AVAILABLE:
+            print("❌ Hardware não disponível - modo simulação")
+            return
+        
         try:
             print("Inicializando hardware...")
             self.motor = Ordinary_Car()
@@ -111,9 +145,9 @@ class RobotController:
                 except Exception as e:
                     print(f"✗ LED falhou: {e}")
                     self.led_available = False
-                    self.led = Led()  # Usar versão mock
+                    self.led = Led()
             else:
-                self.led = Led()  # Usar versão mock
+                self.led = Led()
                 print("○ LED não disponível (modo mock)")
             
             # Inicializar webcam USB se OpenCV disponível
@@ -133,8 +167,27 @@ class RobotController:
                     print(f"✗ Câmera falhou: {e}")
                     self.camera = None
                     self.camera_available = False
-            else:
-                print("○ OpenCV não disponível - câmera desabilitada")
+            
+            # Inicializar Groq AI
+            if self.ai_available:
+                try:
+                    config_path = Path(__file__).parent / 'config.json'
+                    if config_path.exists():
+                        with open(config_path) as f:
+                            config = json.load(f)
+                            api_key = config.get('groq_api_key')
+                            if api_key:
+                                self.groq_client = GroqVisionClient(api_key)
+                                print("✓ Groq AI inicializada")
+                            else:
+                                print("⚠️ GROQ_API_KEY não configurada")
+                                self.ai_available = False
+                    else:
+                        print("⚠️ config.json não encontrado")
+                        self.ai_available = False
+                except Exception as e:
+                    print(f"✗ Groq AI falhou: {e}")
+                    self.ai_available = False
             
             self.running = True
             print("\n✓ Hardware inicializado com sucesso!")
@@ -176,8 +229,23 @@ class RobotController:
                     'battery': round(self.adc.read_adc(2) * (3 if self.adc.pcb_version == 1 else 2), 2),
                     'mode': self.car_mode,
                     'led_available': self.led_available,
-                    'camera_available': self.camera_available
+                    'camera_available': self.camera_available,
+                    'ai_available': self.ai_available,
+                    'ai_enabled': self.ai_enabled
                 }
+                
+                # Adicionar dados da IA se disponível
+                if self.ai_enabled and self.last_ai_decision:
+                    data['ai_decision'] = self.last_ai_decision
+                    data['ai_stats'] = self.ai_stats
+                
+                self.sensor_data = data
+                
+                # Capturar frame da câmera
+                if self.camera and self.camera.isOpened():
+                    ret, frame = self.camera.read()
+                    if ret:
+                        self.current_frame = frame
                 
                 # Enviar dados via SocketIO
                 socketio.emit('sensor_data', data)
@@ -218,11 +286,78 @@ class RobotController:
                     self.infrared_mode()
                 elif self.car_mode == 'light':
                     self.light_mode()
+                elif self.car_mode in ['ai', 'ai_vision']:
+                    self.ai_mode()
                 else:
                     time.sleep(0.1)
             except Exception as e:
                 print(f"Erro no modo automático: {e}")
                 time.sleep(0.5)
+    
+    def ai_mode(self):
+        """Modo de navegação com IA"""
+        if not self.ai_enabled or not self.groq_client:
+            time.sleep(0.5)
+            return
+        
+        try:
+            # Decidir se usa visão ou só sensores
+            use_vision = (self.car_mode == 'ai_vision' and 
+                         self.current_frame is not None)
+            
+            # Fazer requisição à IA
+            if use_vision:
+                result = self.groq_client.analyze_scene(
+                    self.current_frame,
+                    self.sensor_data
+                )
+            else:
+                result = self.groq_client.simple_decision(self.sensor_data)
+            
+            if result['success']:
+                decision = result['decision']
+                self.last_ai_decision = decision
+                self.ai_stats['decisions'] += 1
+                self.ai_stats['last_decision_time'] = time.time()
+                
+                # Executar decisão
+                self._execute_ai_decision(decision)
+                
+                # Log
+                print(f"🤖 IA: {decision.get('recommended_action')} - {decision.get('reason')}")
+            else:
+                self.ai_stats['errors'] += 1
+                print(f"⚠️ Erro IA: {result.get('error')}")
+                # Parar em caso de erro
+                self.motor.set_motor_model(0, 0, 0, 0)
+            
+            time.sleep(1.5)  # Intervalo entre decisões
+            
+        except Exception as e:
+            print(f"Erro no modo IA: {e}")
+            self.ai_stats['errors'] += 1
+            self.motor.set_motor_model(0, 0, 0, 0)
+            time.sleep(1)
+    
+    def _execute_ai_decision(self, decision):
+        """Executa decisão da IA"""
+        action = decision.get('recommended_action', 'stop')
+        speed_percent = decision.get('speed', 50)
+        
+        # Limitar velocidade (máx 60%)
+        speed_percent = min(speed_percent, 60)
+        speed = int((speed_percent / 100.0) * 2000)
+        
+        if action == 'forward':
+            self.motor.set_motor_model(speed, speed, speed, speed)
+        elif action == 'backward':
+            self.motor.set_motor_model(-speed, -speed, -speed, -speed)
+        elif action == 'left':
+            self.motor.set_motor_model(-speed, -speed, speed, speed)
+        elif action == 'right':
+            self.motor.set_motor_model(speed, speed, -speed, -speed)
+        else:
+            self.motor.set_motor_model(0, 0, 0, 0)
     
     def ultrasonic_mode(self):
         """Modo de navegação por ultrassom"""
@@ -254,14 +389,6 @@ class RobotController:
             self.motor.set_motor_model(-500, -500, 2000, 2000)
         else:
             self.motor.set_motor_model(600, 600, 600, 600)
-        
-        # Atualizar ângulo do servo
-        if servo_angle <= 30:
-            servo_dir = 1
-        elif servo_angle >= 150:
-            servo_dir = 0
-        
-        servo_angle += 60 if servo_dir == 1 else -60
     
     def infrared_mode(self):
         """Modo de seguir linha"""
@@ -304,7 +431,6 @@ class RobotController:
         if self.camera_available and self.camera and self.camera.isOpened():
             ret, frame = self.camera.read()
             if ret:
-                # Redimensionar para performance
                 frame = cv2.resize(frame, (640, 480))
                 return frame
         return None
@@ -313,6 +439,7 @@ class RobotController:
         """Limpa recursos"""
         print("\nLimpando recursos...")
         self.running = False
+        self.ai_enabled = False
         
         if self.motor:
             self.motor.set_motor_model(0, 0, 0, 0)
@@ -358,311 +485,423 @@ def init_robot():
 def index():
     """Página principal"""
     html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Freenove Smart Car</title>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body { 
-                font-family: 'Segoe UI', Arial, sans-serif; 
-                background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-                color: #fff; 
-                min-height: 100vh;
-                padding: 20px;
-            }
-            .container { 
-                max-width: 1200px; 
-                margin: 0 auto; 
-            }
-            h1 { 
-                color: #00ff88; 
-                text-align: center;
-                margin-bottom: 30px;
-                text-shadow: 0 0 20px rgba(0,255,136,0.5);
-            }
-            .grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-                gap: 20px;
-                margin-bottom: 20px;
-            }
-            .card { 
-                background: rgba(255,255,255,0.05);
-                backdrop-filter: blur(10px);
-                padding: 20px; 
-                border-radius: 15px; 
-                border: 1px solid rgba(255,255,255,0.1);
-                box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-            }
-            .card h3 {
-                color: #00d4ff;
-                margin-bottom: 15px;
-                border-bottom: 2px solid rgba(0,212,255,0.3);
-                padding-bottom: 10px;
-            }
-            .sensor-value {
-                font-size: 24px;
-                font-weight: bold;
-                color: #00ff88;
-                margin: 10px 0;
-            }
-            .controls {
-                display: grid;
-                grid-template-columns: repeat(2, 1fr);
-                gap: 10px;
-            }
-            button { 
-                padding: 15px 20px; 
-                font-size: 16px; 
-                cursor: pointer; 
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                border: none;
-                border-radius: 10px;
-                transition: all 0.3s;
-                font-weight: bold;
-            }
-            button:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 5px 20px rgba(102,126,234,0.4);
-            }
-            button:active {
-                transform: translateY(0);
-            }
-            button.active {
-                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-            }
-            input[type="range"] {
-                -webkit-appearance: none;
-                appearance: none;
-                height: 8px;
-                background: rgba(255,255,255,0.1);
-                border-radius: 5px;
-                outline: none;
-            }
-            input[type="range"]::-webkit-slider-thumb {
-                -webkit-appearance: none;
-                appearance: none;
-                width: 20px;
-                height: 20px;
-                background: #667eea;
-                border-radius: 50%;
-                cursor: pointer;
-            }
-            input[type="range"]::-moz-range-thumb {
-                width: 20px;
-                height: 20px;
-                background: #667eea;
-                border-radius: 50%;
-                cursor: pointer;
-                border: none;
-            }
-            .status-indicator {
-                display: inline-block;
-                width: 12px;
-                height: 12px;
-                border-radius: 50%;
-                background: #00ff88;
-                margin-right: 8px;
-                animation: pulse 2s infinite;
-            }
-            @keyframes pulse {
-                0%, 100% { opacity: 1; }
-                50% { opacity: 0.5; }
-            }
-            .info { color: #00d4ff; }
-            .warning { color: #ffd700; }
-            #video {
-                width: 100%;
-                border-radius: 10px;
-                border: 2px solid rgba(255,255,255,0.1);
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🤖 Freenove Smart Car - Web Control</h1>
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Freenove AI Car</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: 'Segoe UI', Arial, sans-serif; 
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #fff; 
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        h1 { 
+            color: #00ff88; 
+            text-align: center;
+            margin-bottom: 20px;
+            text-shadow: 0 0 20px rgba(0,255,136,0.5);
+            font-size: 2em;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .card { 
+            background: rgba(255,255,255,0.05);
+            backdrop-filter: blur(10px);
+            padding: 20px; 
+            border-radius: 15px; 
+            border: 1px solid rgba(255,255,255,0.1);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }
+        .card h3 {
+            color: #00d4ff;
+            margin-bottom: 15px;
+            border-bottom: 2px solid rgba(0,212,255,0.3);
+            padding-bottom: 10px;
+        }
+        .sensor-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #00ff88;
+            margin: 10px 0;
+        }
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+        button { 
+            padding: 15px 20px; 
+            font-size: 16px; 
+            cursor: pointer; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            transition: all 0.3s;
+            font-weight: bold;
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102,126,234,0.4);
+        }
+        button:active { transform: translateY(0); }
+        button.active {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        }
+        button.ai-mode {
+            background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
+        }
+        input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 100%;
+            height: 8px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 5px;
+            outline: none;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            background: #667eea;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #00ff88;
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .info { color: #00d4ff; }
+        .warning { color: #ffd700; }
+        .ai-decision {
+            background: rgba(250,112,154,0.1);
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 10px;
+            border-left: 3px solid #fa709a;
+        }
+        .ai-decision p {
+            margin: 5px 0;
+            font-size: 14px;
+        }
+        #video {
+            width: 100%;
+            border-radius: 10px;
+            border: 2px solid rgba(255,255,255,0.1);
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 5px;
+            font-size: 12px;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+        .badge.success { background: #00ff88; color: #000; }
+        .badge.danger { background: #ff4757; color: #fff; }
+        .badge.warning { background: #ffd700; color: #000; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 Freenove AI Car <span id="ai-badge"></span></h1>
+        
+        <div class="grid">
+            <div class="card">
+                <h3><span class="status-indicator"></span>Status do Sistema</h3>
+                <p id="connection-status" class="info">Conectando...</p>
+                <p>Bateria: <span id="battery" class="sensor-value">--</span>V</p>
+                <p>Modo: <span id="mode" class="sensor-value">--</span></p>
+                <p id="ai-status" style="margin-top: 10px;"></p>
+            </div>
             
-            <div class="grid">
-                <div class="card">
-                    <h3><span class="status-indicator"></span>Status do Sistema</h3>
-                    <p id="connection-status" class="info">Conectando...</p>
-                    <p>Bateria: <span id="battery" class="sensor-value">--</span>V</p>
-                    <p>Modo: <span id="mode" class="sensor-value">--</span></p>
-                </div>
-                
-                <div class="card">
-                    <h3>📡 Sensores</h3>
-                    <p>Ultrassom: <span id="ultrasonic" class="sensor-value">--</span>cm</p>
-                    <p>Luz Esq: <span id="light-left" class="sensor-value">--</span>V</p>
-                    <p>Luz Dir: <span id="light-right" class="sensor-value">--</span>V</p>
-                </div>
-                
-                <div class="card">
-                    <h3>🎮 Modos de Controle</h3>
-                    <div class="controls">
-                        <button onclick="setMode('manual')" id="btn-manual">Manual</button>
-                        <button onclick="setMode('ultrasonic')" id="btn-ultrasonic">Ultrassom</button>
-                        <button onclick="setMode('infrared')" id="btn-infrared">Linha</button>
-                        <button onclick="setMode('light')" id="btn-light">Luz</button>
-                    </div>
-                </div>
-                
-                <div class="card">
-                    <h3>💡 LEDs</h3>
-                    <div class="controls">
-                        <button onclick="setLed('off')" id="btn-led-off">Desligar</button>
-                        <button onclick="setLed('rainbow')" id="btn-led-rainbow">Arco-íris</button>
-                        <button onclick="setLed('breathing')" id="btn-led-breathing">Respiração</button>
-                        <button onclick="setLed('blink')" id="btn-led-blink">Piscar</button>
-                    </div>
+            <div class="card">
+                <h3>📡 Sensores</h3>
+                <p>Ultrassom: <span id="ultrasonic" class="sensor-value">--</span>cm</p>
+                <p>Luz Esq: <span id="light-left" class="sensor-value">--</span>V</p>
+                <p>Luz Dir: <span id="light-right" class="sensor-value">--</span>V</p>
+                <p>Infrared: <span id="infrared" class="sensor-value">--</span></p>
+            </div>
+            
+            <div class="card">
+                <h3>🎮 Modos de Controle</h3>
+                <div class="controls">
+                    <button onclick="setMode('manual')" id="btn-manual">🎮 Manual</button>
+                    <button onclick="setMode('ultrasonic')" id="btn-ultrasonic">📡 Ultrassom</button>
+                    <button onclick="setMode('infrared')" id="btn-infrared">🛤️ Linha</button>
+                    <button onclick="setMode('light')" id="btn-light">💡 Luz</button>
+                    <button onclick="setMode('ai')" id="btn-ai" class="ai-mode">🤖 IA Sensores</button>
+                    <button onclick="setMode('ai_vision')" id="btn-ai_vision" class="ai-mode">👁️ IA Visão</button>
                 </div>
             </div>
             
             <div class="card">
-                <h3>🕹️ Controle Manual</h3>
-                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 300px; margin: 0 auto;">
-                    <div></div>
-                    <button onmousedown="move('forward')" onmouseup="stop()" ontouchstart="move('forward')" ontouchend="stop()">⬆️<br>Frente</button>
-                    <div></div>
-                    
-                    <button onmousedown="move('left')" onmouseup="stop()" ontouchstart="move('left')" ontouchend="stop()">⬅️<br>Esq</button>
-                    <button onclick="stop()" style="background: #dc3545;">⏹️<br>Parar</button>
-                    <button onmousedown="move('right')" onmouseup="stop()" ontouchstart="move('right')" ontouchend="stop()">➡️<br>Dir</button>
-                    
-                    <div></div>
-                    <button onmousedown="move('backward')" onmouseup="stop()" ontouchstart="move('backward')" ontouchend="stop()">⬇️<br>Trás</button>
-                    <div></div>
-                </div>
-                <div style="margin-top: 15px;">
-                    <label>Velocidade: <span id="speed-value">50</span>%</label>
-                    <input type="range" id="speed" min="0" max="100" value="50" style="width: 100%;" oninput="updateSpeed(this.value)">
-                </div>
-            </div>
-            
-            <div class="card">
-                <h3>📹 Câmera</h3>
-                <button onclick="toggleCamera()" id="btn-camera">Ativar Câmera</button>
-                <div style="margin-top: 15px;">
-                    <img id="video" src="" style="display:none;">
+                <h3>💡 LEDs</h3>
+                <div class="controls">
+                    <button onclick="setLed('off')" id="btn-led-off">Desligar</button>
+                    <button onclick="setLed('rainbow')" id="btn-led-rainbow">Arco-íris</button>
+                    <button onclick="setLed('breathing')" id="btn-led-breathing">Respiração</button>
+                    <button onclick="setLed('blink')" id="btn-led-blink">Piscar</button>
                 </div>
             </div>
         </div>
         
-        <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-        <script>
-            const socket = io();
-            let cameraActive = false;
-            let currentMode = 'manual';
-            let currentLed = 'off';
-            let speedMultiplier = 0.5; // 50% inicial
-            
-            socket.on('connect', () => {
-                document.getElementById('connection-status').innerHTML = '✓ Conectado ao robô!';
-                document.getElementById('connection-status').className = 'info';
-            });
-            
-            socket.on('disconnect', () => {
-                document.getElementById('connection-status').innerHTML = '✗ Desconectado';
-                document.getElementById('connection-status').className = 'warning';
-            });
-            
-            socket.on('sensor_data', (data) => {
-                document.getElementById('battery').textContent = data.battery || '--';
-                document.getElementById('ultrasonic').textContent = data.ultrasonic || '--';
-                document.getElementById('light-left').textContent = data.light_left?.toFixed(2) || '--';
-                document.getElementById('light-right').textContent = data.light_right?.toFixed(2) || '--';
-                document.getElementById('mode').textContent = data.mode || '--';
+        <div class="card" id="ai-decision-card" style="display:none;">
+            <h3>🧠 Última Decisão da IA</h3>
+            <div class="ai-decision" id="ai-decision-content">
+                <p><strong>Ação:</strong> <span id="ai-action">--</span></p>
+                <p><strong>Velocidade:</strong> <span id="ai-speed">--</span>%</p>
+                <p><strong>Razão:</strong> <span id="ai-reason">--</span></p>
+                <p><strong>Segurança:</strong> <span id="ai-safety">--</span></p>
+                <p style="margin-top: 10px; font-size: 12px; opacity: 0.7;">
+                    Decisões: <span id="ai-decisions">0</span> | Erros: <span id="ai-errors">0</span>
+                </p>
+            </div>
+        </div>
+        
+        <div class="card">
+            <h3>🕹️ Controle Manual</h3>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 300px; margin: 0 auto;">
+                <div></div>
+                <button onmousedown="move('forward')" onmouseup="stop()" ontouchstart="move('forward')" ontouchend="stop()">⬆️<br>Frente</button>
+                <div></div>
                 
-                // Atualizar botão ativo
-                document.querySelectorAll('.controls button').forEach(b => b.classList.remove('active'));
-                const modeBtn = document.getElementById('btn-' + data.mode);
-                if (modeBtn) modeBtn.classList.add('active');
-            });
+                <button onmousedown="move('left')" onmouseup="stop()" ontouchstart="move('left')" ontouchend="stop()">⬅️<br>Esq</button>
+                <button onclick="stop()" style="background: #dc3545;">⏹️<br>Parar</button>
+                <button onmousedown="move('right')" onmouseup="stop()" ontouchstart="move('right')" ontouchend="stop()">➡️<br>Dir</button>
+                
+                <div></div>
+                <button onmousedown="move('backward')" onmouseup="stop()" ontouchstart="move('backward')" ontouchend="stop()">⬇️<br>Trás</button>
+                <div></div>
+            </div>
+            <div style="margin-top: 15px;">
+                <label>Velocidade: <span id="speed-value">50</span>%</label>
+                <input type="range" id="speed" min="0" max="100" value="50" oninput="updateSpeed(this.value)">
+            </div>
+        </div>
+        
+        <div class="card">
+            <h3>📹 Câmera</h3>
+            <button onclick="toggleCamera()" id="btn-camera">Ativar Câmera</button>
+            <div style="margin-top: 15px;">
+                <img id="video" src="" style="display:none;">
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script>
+        const socket = io();
+        let cameraActive = false;
+        let currentMode = 'manual';
+        let currentLed = 'off';
+        let speedMultiplier = 0.5;
+        let aiAvailable = false;
+        
+        socket.on('connect', () => {
+            document.getElementById('connection-status').innerHTML = '✓ Conectado ao robô!';
+            document.getElementById('connection-status').className = 'info';
+        });
+        
+        socket.on('disconnect', () => {
+            document.getElementById('connection-status').innerHTML = '✗ Desconectado';
+            document.getElementById('connection-status').className = 'warning';
+        });
+        
+        socket.on('sensor_data', (data) => {
+            // Sensores
+            document.getElementById('battery').textContent = data.battery || '--';
+            document.getElementById('ultrasonic').textContent = data.ultrasonic || '--';
+            document.getElementById('light-left').textContent = data.light_left?.toFixed(2) || '--';
+            document.getElementById('light-right').textContent = data.light_right?.toFixed(2) || '--';
+            document.getElementById('infrared').textContent = data.infrared?.join(', ') || '--';
+            document.getElementById('mode').textContent = data.mode || '--';
             
-            socket.on('status', (data) => {
-                console.log(data.message);
-            });
+            // Status da IA
+            aiAvailable = data.ai_available || false;
+            updateAIBadge(data.ai_enabled, aiAvailable);
             
-            function setMode(mode) {
-                socket.emit('car_mode', { mode: mode });
-                currentMode = mode;
+            // Atualizar botões ativos
+            document.querySelectorAll('.controls button').forEach(b => b.classList.remove('active'));
+            const modeBtn = document.getElementById('btn-' + data.mode);
+            if (modeBtn) modeBtn.classList.add('active');
+            
+            // Decisão da IA
+            if (data.ai_decision) {
+                showAIDecision(data.ai_decision, data.ai_stats);
+            } else if (data.mode !== 'ai' && data.mode !== 'ai_vision') {
+                document.getElementById('ai-decision-card').style.display = 'none';
+            }
+        });
+        
+        function updateAIBadge(enabled, available) {
+            const badge = document.getElementById('ai-badge');
+            const status = document.getElementById('ai-status');
+            
+            if (!available) {
+                badge.innerHTML = '<span class="badge danger">IA Indisponível</span>';
+                status.innerHTML = '⚠️ Configure GROQ_API_KEY no config.json';
+                status.className = 'warning';
+            } else if (enabled) {
+                badge.innerHTML = '<span class="badge success">IA ATIVA</span>';
+                status.innerHTML = '🤖 IA em operação';
+                status.className = 'info';
+            } else {
+                badge.innerHTML = '<span class="badge warning">IA Pronta</span>';
+                status.innerHTML = 'ℹ️ Selecione um modo de IA para ativar';
+                status.className = 'info';
+            }
+        }
+        
+        function showAIDecision(decision, stats) {
+            document.getElementById('ai-decision-card').style.display = 'block';
+            document.getElementById('ai-action').textContent = decision.recommended_action || '--';
+            document.getElementById('ai-speed').textContent = decision.speed || '--';
+            document.getElementById('ai-reason').textContent = decision.reason || '--';
+            document.getElementById('ai-safety').textContent = decision.safety_level || '--';
+            
+            if (stats) {
+                document.getElementById('ai-decisions').textContent = stats.decisions || 0;
+                document.getElementById('ai-errors').textContent = stats.errors || 0;
+            }
+        }
+        
+        socket.on('status', (data) => {
+            console.log(data.message);
+        });
+        
+        function setMode(mode) {
+            socket.emit('car_mode', { mode: mode });
+            currentMode = mode;
+        }
+        
+        function updateSpeed(value) {
+            speedMultiplier = value / 100;
+            document.getElementById('speed-value').textContent = value;
+        }
+        
+        function move(direction) {
+            if (currentMode !== 'manual') return;
+            
+            const baseSpeed = 2000;
+            const speed = Math.round(baseSpeed * speedMultiplier);
+            
+            let fl = 0, bl = 0, fr = 0, br = 0;
+            
+            switch(direction) {
+                case 'forward':
+                    fl = bl = fr = br = speed;
+                    break;
+                case 'backward':
+                    fl = bl = fr = br = -speed;
+                    break;
+                case 'left':
+                    fl = bl = -speed;
+                    fr = br = speed;
+                    break;
+                case 'right':
+                    fl = bl = speed;
+                    fr = br = -speed;
+                    break;
             }
             
-            function updateSpeed(value) {
-                speedMultiplier = value / 100;
-                document.getElementById('speed-value').textContent = value;
-            }
+            socket.emit('motor_control', { fl, bl, fr, br });
+        }
+        
+        function stop() {
+            socket.emit('motor_control', { fl: 0, bl: 0, fr: 0, br: 0 });
+        }
+        
+        function setLed(mode) {
+            socket.emit('led_mode', { mode: mode });
+            currentLed = mode;
+            document.querySelectorAll('[id^="btn-led-"]').forEach(b => b.classList.remove('active'));
+            document.getElementById('btn-led-' + mode).classList.add('active');
+        }
+        
+        function toggleCamera() {
+            cameraActive = !cameraActive;
+            socket.emit('camera_toggle', { active: cameraActive });
+            const video = document.getElementById('video');
+            const btn = document.getElementById('btn-camera');
             
-            function move(direction) {
-                if (currentMode !== 'manual') return;
-                
-                const baseSpeed = 2000;
-                const speed = Math.round(baseSpeed * speedMultiplier);
-                
-                let fl = 0, bl = 0, fr = 0, br = 0;
-                
-                switch(direction) {
-                    case 'forward':
-                        fl = bl = fr = br = speed;
-                        break;
-                    case 'backward':
-                        fl = bl = fr = br = -speed;
-                        break;
-                    case 'left':
-                        fl = bl = -speed;
-                        fr = br = speed;
-                        break;
-                    case 'right':
-                        fl = bl = speed;
-                        fr = br = -speed;
-                        break;
-                }
-                
-                socket.emit('motor_control', { fl, bl, fr, br });
+            if (cameraActive) {
+                video.src = '/video_feed';
+                video.style.display = 'block';
+                btn.textContent = 'Desativar Câmera';
+                btn.classList.add('active');
+            } else {
+                video.src = '';
+                video.style.display = 'none';
+                btn.textContent = 'Ativar Câmera';
+                btn.classList.remove('active');
             }
+        }
+        
+        // Atalhos de teclado
+        document.addEventListener('keydown', (e) => {
+            if (currentMode !== 'manual') return;
             
-            function stop() {
-                socket.emit('motor_control', { fl: 0, bl: 0, fr: 0, br: 0 });
+            switch(e.key) {
+                case 'ArrowUp':
+                case 'w':
+                    move('forward');
+                    break;
+                case 'ArrowDown':
+                case 's':
+                    move('backward');
+                    break;
+                case 'ArrowLeft':
+                case 'a':
+                    move('left');
+                    break;
+                case 'ArrowRight':
+                case 'd':
+                    move('right');
+                    break;
+                case ' ':
+                    stop();
+                    e.preventDefault();
+                    break;
             }
-            
-            function setLed(mode) {
-                socket.emit('led_mode', { mode: mode });
-                currentLed = mode;
-                document.querySelectorAll('[id^="btn-led-"]').forEach(b => b.classList.remove('active'));
-                document.getElementById('btn-led-' + mode).classList.add('active');
+        });
+        
+        document.addEventListener('keyup', (e) => {
+            if (currentMode !== 'manual') return;
+            if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'w', 'a', 's', 'd'].includes(e.key)) {
+                stop();
             }
-            
-            function toggleCamera() {
-                cameraActive = !cameraActive;
-                socket.emit('camera_toggle', { active: cameraActive });
-                const video = document.getElementById('video');
-                const btn = document.getElementById('btn-camera');
-                
-                if (cameraActive) {
-                    video.src = '/video_feed';
-                    video.style.display = 'block';
-                    btn.textContent = 'Desativar Câmera';
-                    btn.classList.add('active');
-                } else {
-                    video.src = '';
-                    video.style.display = 'none';
-                    btn.textContent = 'Ativar Câmera';
-                    btn.classList.remove('active');
-                }
-            }
-            
-            // Marcar modo manual como ativo ao carregar
-            document.getElementById('btn-manual').classList.add('active');
-            document.getElementById('btn-led-off').classList.add('active');
-        </script>
-    </body>
-    </html>
+        });
+        
+        // Marcar modo manual como ativo ao carregar
+        document.getElementById('btn-manual').classList.add('active');
+        document.getElementById('btn-led-off').classList.add('active');
+    </script>
+</body>
+</html>
     """
-    return html
+    return render_template_string(html)
 
 @app.route('/video_feed')
 def video_feed():
@@ -676,7 +915,7 @@ def video_feed():
                     if ret:
                         yield (b'--frame\r\n'
                                b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-            time.sleep(0.03)  # ~30 fps
+            time.sleep(0.03)
     
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
@@ -688,7 +927,8 @@ def handle_connect():
     emit('status', {
         'message': 'Conectado ao robô',
         'led_available': robot.led_available if robot else False,
-        'camera_available': robot.camera_available if robot else False
+        'camera_available': robot.camera_available if robot else False,
+        'ai_available': robot.ai_available if robot else False
     })
 
 @socketio.on('disconnect')
@@ -711,27 +951,6 @@ def handle_motor(data):
         except Exception as e:
             print(f"Erro no controle do motor: {e}")
 
-@socketio.on('servo_control')
-def handle_servo(data):
-    """Controle do servo"""
-    if robot:
-        try:
-            servo_id = str(data.get('id', '0'))
-            angle = int(data.get('angle', 90))
-            robot.servo.set_servo_pwm(servo_id, angle)
-        except Exception as e:
-            print(f"Erro no controle do servo: {e}")
-
-@socketio.on('buzzer_control')
-def handle_buzzer(data):
-    """Controle do buzzer"""
-    if robot:
-        try:
-            state = bool(data.get('state', False))
-            robot.buzzer.set_state(state)
-        except Exception as e:
-            print(f"Erro no controle do buzzer: {e}")
-
 @socketio.on('led_mode')
 def handle_led_mode(data):
     """Modo de LED"""
@@ -752,10 +971,27 @@ def handle_car_mode(data):
     if robot:
         try:
             mode = data.get('mode', 'manual')
+            
+            # Verificar se modo IA está disponível
+            if mode in ['ai', 'ai_vision'] and not robot.ai_available:
+                emit('status', {'message': 'IA não disponível. Configure GROQ_API_KEY'})
+                return
+            
+            # Desabilitar IA se estava ativo
+            if robot.car_mode in ['ai', 'ai_vision']:
+                robot.ai_enabled = False
+            
+            # Mudar modo
             robot.car_mode = mode
-            if mode == 'manual':
+            
+            # Ativar IA se necessário
+            if mode in ['ai', 'ai_vision']:
+                robot.ai_enabled = True
+                emit('status', {'message': f'🤖 Modo IA ativado: {mode}'})
+            else:
                 robot.motor.set_motor_model(0, 0, 0, 0)
-            emit('status', {'message': f'Modo do carro: {mode}'})
+                emit('status', {'message': f'Modo: {mode}'})
+                
         except Exception as e:
             print(f"Erro no modo do carro: {e}")
 
@@ -775,13 +1011,21 @@ def handle_camera(data):
 if __name__ == '__main__':
     try:
         print("=" * 60)
-        print("Iniciando servidor web do Freenove Smart Car...")
+        print("🚗 Iniciando servidor web do Freenove AI Car...")
         print("=" * 60)
         init_robot()
+        
+        # Obter IP
+        import socket
+        hostname = socket.gethostname()
+        ip = socket.gethostbyname(hostname)
+        
         print("\n" + "=" * 60)
         print("✓ Robô inicializado!")
-        print("✓ Acesse http://<IP_DA_RASPBERRY>:5000")
+        print(f"✓ Acesse: http://{ip}:5000")
+        print(f"✓ IA disponível: {'Sim' if robot.ai_available else 'Não'}")
         print("=" * 60 + "\n")
+        
         socketio.run(app, host='0.0.0.0', port=5000, debug=False)
     except KeyboardInterrupt:
         print("\n\nEncerrando servidor...")
