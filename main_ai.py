@@ -154,8 +154,10 @@ class AICarController:
             api_key = self.config.get('groq_api_key')
             if api_key:
                 try:
-                    self.groq_client = GroqVisionClient(api_key)
-                    print("✓ Groq AI inicializada")
+                    rate_limit = self.config.get('rate_limit', 8)
+                    self.groq_client = GroqVisionClient(api_key, rate_limit=rate_limit)
+                    self.groq_client.cache_duration = self.config.get('cache_duration', 2.0)
+                    print(f"✓ Groq AI inicializada (limite: {rate_limit} req/min)")
                 except Exception as e:
                     print(f"✗ Erro ao inicializar Groq: {e}")
             else:
@@ -241,7 +243,9 @@ class AICarController:
     
     def _ai_loop(self):
         """Loop principal de decisões da IA"""
-        interval = self.config.get('decision_interval', 1.0)
+        interval = self.config.get('decision_interval', 3.0)
+        
+        print(f"\n⏱️  Intervalo entre decisões: {interval}s")
         
         while self.running:
             if not self.ai_enabled:
@@ -249,6 +253,8 @@ class AICarController:
                 continue
             
             try:
+                start_time = time.time()
+                
                 # Fazer decisão
                 if self.vision_enabled and self.current_frame is not None:
                     result = self.groq_client.analyze_scene(
@@ -265,7 +271,8 @@ class AICarController:
                     self.stats['decisions_made'] += 1
                     
                     # Log
-                    print(f"\n🎯 Decisão #{self.stats['decisions_made']}")
+                    cached = " [CACHE]" if result.get('cached') else ""
+                    print(f"\n🎯 Decisão #{self.stats['decisions_made']}{cached}")
                     print(f"   Ação: {decision.get('recommended_action', 'N/A')}")
                     print(f"   Velocidade: {decision.get('speed', 0)}%")
                     print(f"   Razão: {decision.get('reason', 'N/A')}")
@@ -274,13 +281,16 @@ class AICarController:
                     print(f"⚠️  Erro na IA: {result.get('error')}")
                     self.stats['errors'] += 1
                 
-                time.sleep(interval)
+                # Ajustar intervalo baseado no tempo de processamento
+                elapsed = time.time() - start_time
+                sleep_time = max(interval - elapsed, 1.0)
+                time.sleep(sleep_time)
                 
             except Exception as e:
                 print(f"❌ Erro no loop de IA: {e}")
                 self.stats['errors'] += 1
                 self.motor.set_motor_model(0, 0, 0, 0)
-                time.sleep(1)
+                time.sleep(2)
     
     def _execute_decision(self, decision: Dict):
         """Executa decisão da IA no hardware"""

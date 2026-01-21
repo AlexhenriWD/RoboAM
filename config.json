@@ -1,8 +1,11 @@
 {
   "groq_api_key": "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",
-  "ai_mode": "sensor_only", 
-  "decision_interval": 1.5,  
-  "max_speed": 60,           
-  "safety_distance": 30,      
-  "camera_enabled": true
+  "ai_mode": "sensor_only",
+  "decision_interval": 3.0,
+  "rate_limit": 8,
+  "cache_duration": 2.0,
+  "max_speed": 60,
+  "safety_distance": 30,
+  "camera_enabled": true,
+  "log_decisions": true
 }

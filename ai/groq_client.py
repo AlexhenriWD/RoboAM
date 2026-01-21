@@ -1,11 +1,14 @@
 """
 Cliente Groq para processamento de visão e decisões do carro autônomo
+Com rate limiting e cache para evitar erro 429
 """
 
 import os
 import json
 import base64
+import time
 from typing import Dict, List, Optional, Tuple
+from collections import deque
 import requests
 from io import BytesIO
 
@@ -18,20 +21,70 @@ except ImportError:
     print("OpenCV não disponível - funcionalidade de visão limitada")
 
 
+class RateLimiter:
+    """Rate limiter simples para controlar requisições"""
+    
+    def __init__(self, max_requests: int = 10, time_window: int = 60):
+        """
+        Args:
+            max_requests: Número máximo de requisições
+            time_window: Janela de tempo em segundos
+        """
+        self.max_requests = max_requests
+        self.time_window = time_window
+        self.requests = deque()
+    
+    def can_make_request(self) -> bool:
+        """Verifica se pode fazer uma requisição"""
+        now = time.time()
+        
+        # Remover requisições antigas
+        while self.requests and self.requests[0] < now - self.time_window:
+            self.requests.popleft()
+        
+        return len(self.requests) < self.max_requests
+    
+    def add_request(self):
+        """Registra uma nova requisição"""
+        self.requests.append(time.time())
+    
+    def wait_if_needed(self):
+        """Espera se necessário antes de fazer requisição"""
+        while not self.can_make_request():
+            sleep_time = self.requests[0] + self.time_window - time.time()
+            if sleep_time > 0:
+                print(f"⏳ Rate limit: aguardando {sleep_time:.1f}s...")
+                time.sleep(min(sleep_time + 0.5, 5))
+            else:
+                break
+
+
 class GroqVisionClient:
     """Cliente para usar Groq API com visão computacional"""
     
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, rate_limit: int = 10):
         self.api_key = api_key or os.getenv('GROQ_API_KEY')
         if not self.api_key:
             raise ValueError("GROQ_API_KEY não encontrada. Configure no .env ou passe como parâmetro")
         
         self.api_url = "https://api.groq.com/openai/v1/chat/completions"
-        self.model = "meta-llama/llama-4-maverick-17b-128e-instruct"  # Modelo com visão
+        self.model = "llama-3.2-90b-vision-preview"
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
+        
+        # Rate limiter (10 requisições por minuto por padrão)
+        self.rate_limiter = RateLimiter(max_requests=rate_limit, time_window=60)
+        
+        # Cache de decisões (evita requisições repetidas)
+        self.last_decision = None
+        self.last_decision_time = 0
+        self.cache_duration = 2.0  # Reutilizar decisão por 2 segundos
+        
+        # Retry configuration
+        self.max_retries = 2
+        self.retry_delay = 2.0
         
     def encode_image(self, image) -> str:
         """Codifica imagem para base64"""
@@ -94,8 +147,71 @@ Considere:
 3. Use os sensores infravermelhos para detectar linhas
 4. Mantenha bateria acima de 6.5V"""
 
-        # Fazer requisição
-        payload = {
+            def _make_request(self, payload: Dict, use_cache: bool = True) -> Dict:
+        """
+        Faz requisição à API com rate limiting e retry
+        
+        Args:
+            payload: Dados da requisição
+            use_cache: Se deve usar cache de decisões
+        
+        Returns:
+            Resposta da API ou decisão em cache
+        """
+        # Verificar cache
+        if use_cache and self.last_decision:
+            time_since_last = time.time() - self.last_decision_time
+            if time_since_last < self.cache_duration:
+                print(f"📦 Usando decisão em cache ({time_since_last:.1f}s atrás)")
+                return {
+                    'success': True,
+                    'decision': self.last_decision,
+                    'cached': True
+                }
+        
+        # Rate limiting
+        self.rate_limiter.wait_if_needed()
+        
+        # Tentar fazer requisição com retry
+        for attempt in range(self.max_retries):
+            try:
+                self.rate_limiter.add_request()
+                
+                response = requests.post(
+                    self.api_url,
+                    headers=self.headers,
+                    json=payload,
+                    timeout=15
+                )
+                
+                # Tratar erro 429 especificamente
+                if response.status_code == 429:
+                    if attempt < self.max_retries - 1:
+                        wait_time = self.retry_delay * (attempt + 1)
+                        print(f"⏳ Rate limit atingido, aguardando {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        # Última tentativa falhou, retornar fallback
+                        return {'success': False, 'error': 'Rate limit excedido'}
+                
+                response.raise_for_status()
+                return {'success': True, 'response': response.json()}
+                
+            except requests.exceptions.Timeout:
+                if attempt < self.max_retries - 1:
+                    print(f"⏱️ Timeout, tentativa {attempt + 2}/{self.max_retries}...")
+                    time.sleep(self.retry_delay)
+                    continue
+                return {'success': False, 'error': 'Timeout na API'}
+                
+            except requests.exceptions.RequestException as e:
+                if attempt < self.max_retries - 1 and '429' not in str(e):
+                    time.sleep(self.retry_delay)
+                    continue
+                return {'success': False, 'error': str(e)}
+        
+        return {'success': False, 'error': 'Máximo de tentativas excedido'}
             "model": self.model,
             "messages": [
                 {
@@ -195,49 +311,68 @@ Dados dos sensores:
 - Luz direita: {sensor_data.get('light_right', 'N/A')} V
 - Bateria: {sensor_data.get('battery', 'N/A')} V
 
-Retorne APENAS um JSON válido com sua decisão:
+Retorne APENAS um JSON válido (sem markdown, sem explicações):
 {{
   "recommended_action": "forward|backward|left|right|stop",
   "speed": 0-100,
-  "reason": "explicação breve",
+  "reason": "explicação curta",
   "safety_level": "safe|caution|danger"
-}}"""
+}}
+
+IMPORTANTE:
+- Distância < 30cm: STOP ou BACKWARD
+- Velocidade máxima: 60
+- Retorne APENAS o JSON"""
 
         payload = {
-            "model": "llama-3.3-70b-versatile",  # Modelo texto-only mais rápido
+            "model": "llama-3.3-70b-versatile",
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-            "max_tokens": 200
+            "temperature": 0.2,
+            "max_tokens": 150
         }
         
+        result = self._make_request(payload)
+        
+        if not result['success']:
+            print(f"❌ Erro na API: {result.get('error')}")
+            return {
+                'success': False,
+                'error': result.get('error'),
+                'decision': self._get_safe_fallback(sensor_data)
+            }
+        
+        # Se veio do cache
+        if result.get('cached'):
+            return result
+        
         try:
-            response = requests.post(
-                self.api_url,
-                headers=self.headers,
-                json=payload,
-                timeout=5
-            )
-            response.raise_for_status()
-            
-            content = response.json()['choices'][0]['message']['content']
+            content = result['response']['choices'][0]['message']['content']
             
             # Limpar markdown
             content = content.strip()
-            if content.startswith('```json'):
-                content = content[7:]
-            if content.startswith('```'):
-                content = content[3:]
-            if content.endswith('```'):
-                content = content[:-3]
+            if '```json' in content:
+                content = content.split('```json')[1].split('```')[0]
+            elif '```' in content:
+                content = content.split('```')[1].split('```')[0]
             
             decision = json.loads(content.strip())
+            
+            # Validar
+            required = ['recommended_action', 'speed', 'reason', 'safety_level']
+            if not all(k in decision for k in required):
+                raise ValueError("Campos obrigatórios faltando")
+            
+            # Cachear
+            self.last_decision = decision
+            self.last_decision_time = time.time()
             
             return {
                 'success': True,
                 'decision': decision
             }
             
-        except Exception as e:
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            print(f"❌ Erro ao parsear: {e}")
             return {
                 'success': False,
                 'error': str(e),
