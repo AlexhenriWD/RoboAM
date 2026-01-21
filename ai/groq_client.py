@@ -101,53 +101,7 @@ class GroqVisionClient:
         _, buffer = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 85])
         return base64.b64encode(buffer).decode('utf-8')
     
-    def analyze_scene(self, image, sensor_data: Dict) -> Dict:
-        """
-        Analisa a cena e retorna decisões de navegação
-        
-        Args:
-            image: Frame da câmera (numpy array)
-            sensor_data: Dados dos sensores (ultrassom, infrared, luz, etc)
-            
-        Returns:
-            Dict com análise e comando de movimento
-        """
-        
-        # Preparar contexto dos sensores
-        sensor_context = f"""
-Dados dos sensores do robô:
-- Distância ultrasônica: {sensor_data.get('ultrasonic', 'N/A')} cm
-- Sensores infravermelhos: {sensor_data.get('infrared', [])}
-- Luz esquerda: {sensor_data.get('light_left', 'N/A')} V
-- Luz direita: {sensor_data.get('light_right', 'N/A')} V
-- Bateria: {sensor_data.get('battery', 'N/A')} V
-"""
-        
-        # Codificar imagem
-        image_base64 = self.encode_image(image)
-        
-        # Prompt para análise
-        prompt = f"""Você é o sistema de visão de um robô autônomo Freenove Smart Car.
-
-{sensor_context}
-
-Analise a imagem da câmera e os dados dos sensores, então retorne APENAS um JSON válido (sem markdown) com:
-{{
-  "scene_description": "descrição breve do que vê",
-  "obstacles": ["lista de obstáculos detectados"],
-  "recommended_action": "forward|backward|left|right|stop",
-  "speed": 0-100,
-  "reason": "explicação da decisão",
-  "safety_level": "safe|caution|danger"
-}}
-
-Considere:
-1. Obstáculos próximos (< 30cm) exigem parada ou desvio
-2. Prefira movimentos suaves
-3. Use os sensores infravermelhos para detectar linhas
-4. Mantenha bateria acima de 6.5V"""
-
-            def _make_request(self, payload: Dict, use_cache: bool = True) -> Dict:
+    def _make_request(self, payload: Dict, use_cache: bool = True) -> Dict:
         """
         Faz requisição à API com rate limiting e retry
         
@@ -212,6 +166,54 @@ Considere:
                 return {'success': False, 'error': str(e)}
         
         return {'success': False, 'error': 'Máximo de tentativas excedido'}
+    
+    def analyze_scene(self, image, sensor_data: Dict) -> Dict:
+        """
+        Analisa a cena e retorna decisões de navegação
+        
+        Args:
+            image: Frame da câmera (numpy array)
+            sensor_data: Dados dos sensores (ultrassom, infrared, luz, etc)
+            
+        Returns:
+            Dict com análise e comando de movimento
+        """
+        
+        # Preparar contexto dos sensores
+        sensor_context = f"""
+Dados dos sensores do robô:
+- Distância ultrasônica: {sensor_data.get('ultrasonic', 'N/A')} cm
+- Sensores infravermelhos: {sensor_data.get('infrared', [])}
+- Luz esquerda: {sensor_data.get('light_left', 'N/A')} V
+- Luz direita: {sensor_data.get('light_right', 'N/A')} V
+- Bateria: {sensor_data.get('battery', 'N/A')} V
+"""
+        
+        # Codificar imagem
+        image_base64 = self.encode_image(image)
+        
+        # Prompt para análise
+        prompt = f"""Você é o sistema de visão de um robô autônomo Freenove Smart Car.
+
+{sensor_context}
+
+Analise a imagem da câmera e os dados dos sensores, então retorne APENAS um JSON válido (sem markdown) com:
+{{
+  "scene_description": "descrição breve do que vê",
+  "obstacles": ["lista de obstáculos detectados"],
+  "recommended_action": "forward|backward|left|right|stop",
+  "speed": 0-100,
+  "reason": "explicação da decisão",
+  "safety_level": "safe|caution|danger"
+}}
+
+Considere:
+1. Obstáculos próximos (< 30cm) exigem parada ou desvio
+2. Prefira movimentos suaves
+3. Use os sensores infravermelhos para detectar linhas
+4. Mantenha bateria acima de 6.5V"""
+
+        payload = {
             "model": self.model,
             "messages": [
                 {
@@ -227,21 +229,25 @@ Considere:
                     ]
                 }
             ],
-            "temperature": 0.3,  # Baixa temperatura para respostas mais consistentes
+            "temperature": 0.3,
             "max_tokens": 500
         }
         
+        result = self._make_request(payload)
+        
+        if not result['success']:
+            print(f"❌ Erro na API: {result.get('error')}")
+            return {
+                'success': False,
+                'error': result.get('error'),
+                'decision': self._get_safe_fallback(sensor_data)
+            }
+        
+        if result.get('cached'):
+            return result
+        
         try:
-            response = requests.post(
-                self.api_url,
-                headers=self.headers,
-                json=payload,
-                timeout=10
-            )
-            response.raise_for_status()
-            
-            result = response.json()
-            content = result['choices'][0]['message']['content']
+            content = result['response']['choices'][0]['message']['content']
             
             # Extrair JSON da resposta
             content = content.strip()
@@ -254,18 +260,16 @@ Considere:
             
             decision = json.loads(content.strip())
             
+            # Cachear
+            self.last_decision = decision
+            self.last_decision_time = time.time()
+            
             return {
                 'success': True,
                 'decision': decision,
                 'raw_response': content
             }
             
-        except requests.exceptions.RequestException as e:
-            return {
-                'success': False,
-                'error': f'Erro na API: {str(e)}',
-                'decision': self._get_safe_fallback(sensor_data)
-            }
         except json.JSONDecodeError as e:
             return {
                 'success': False,
