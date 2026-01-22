@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Sistema Principal do Freenove Smart Car com IA (Groq)
-Modo autônomo com visão computacional e tomada de decisões
+Versão Otimizada - Removido LED e Servo
 """
 
 import sys
@@ -14,7 +14,6 @@ from typing import Dict, Optional
 # Importar hardware
 sys.path.insert(0, str(Path(__file__).parent / 'hardware'))
 from hardware.motor import Ordinary_Car
-from hardware.servo import Servo
 from hardware.ultrasonic import Ultrasonic
 from hardware.infrared import Infrared
 from hardware.adc import ADC
@@ -29,13 +28,6 @@ try:
 except ImportError:
     CAMERA_AVAILABLE = False
     print("⚠️  OpenCV não disponível - modo sem visão")
-
-try:
-    from led import Led
-    LED_AVAILABLE = True
-except ImportError:
-    LED_AVAILABLE = False
-    print("⚠️  LED não disponível")
 
 
 class AICarController:
@@ -54,12 +46,10 @@ class AICarController:
         
         # Hardware
         self.motor = None
-        self.servo = None
         self.ultrasonic = None
         self.infrared = None
         self.adc = None
         self.buzzer = None
-        self.led = None
         self.camera = None
         
         # IA
@@ -99,11 +89,12 @@ class AICarController:
             print(f"⚠️  Config não encontrada: {path}, usando padrões")
             return {
                 'groq_api_key': '',
-                'ai_mode': 'sensor_only',  # sensor_only, vision, hybrid
+                'ai_mode': 'sensor_only',
                 'decision_interval': 1.0,
                 'max_speed': 60,
                 'safety_distance': 30,
-                'camera_enabled': True
+                'camera_enabled': True,
+                'rate_limit': 8
             }
     
     def initialize(self):
@@ -117,9 +108,6 @@ class AICarController:
             self.motor = Ordinary_Car()
             print("✓ Motor inicializado")
             
-            self.servo = Servo()
-            print("✓ Servo inicializado")
-            
             self.ultrasonic = Ultrasonic()
             print("✓ Ultrasonic inicializado")
             
@@ -132,19 +120,27 @@ class AICarController:
             self.buzzer = Buzzer()
             print("✓ Buzzer inicializado")
             
-            # LED (opcional)
-            if LED_AVAILABLE:
-                self.led = Led()
-                print("✓ LED inicializado")
+            # Beep de inicialização (3 beeps)
+            for _ in range(3):
+                self.buzzer.set_state(True)
+                time.sleep(0.1)
+                self.buzzer.set_state(False)
+                time.sleep(0.1)
+            print("✓ Beep de inicialização concluído")
             
             # Câmera (opcional)
             if CAMERA_AVAILABLE and self.config.get('camera_enabled'):
                 try:
                     self.camera = cv2.VideoCapture(0)
                     if self.camera.isOpened():
-                        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                        print("✓ Câmera inicializada")
+                        # Resolução HD
+                        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                        self.camera.set(cv2.CAP_PROP_FPS, 30)
+                        # Ajustes de qualidade
+                        self.camera.set(cv2.CAP_PROP_BRIGHTNESS, 128)
+                        self.camera.set(cv2.CAP_PROP_CONTRAST, 128)
+                        print("✓ Câmera inicializada (1280x720)")
                     else:
                         self.camera = None
                 except:
@@ -222,8 +218,10 @@ class AICarController:
         mode = "visão" if self.vision_enabled else "sensores"
         print(f"\n🤖 IA ATIVADA - Modo: {mode}")
         
-        if self.led and LED_AVAILABLE:
-            self.led.colorBlink(3)  # Indicar que IA está ativa
+        # Beep de confirmação
+        self.buzzer.set_state(True)
+        time.sleep(0.2)
+        self.buzzer.set_state(False)
         
         # Iniciar thread de IA
         if self.ai_thread is None or not self.ai_thread.is_alive():
@@ -238,8 +236,12 @@ class AICarController:
         self.motor.set_motor_model(0, 0, 0, 0)
         print("\n⏸️  IA DESATIVADA")
         
-        if self.led and LED_AVAILABLE:
-            self.led.colorBlink(0)
+        # Beep de desativação
+        for _ in range(2):
+            self.buzzer.set_state(True)
+            time.sleep(0.05)
+            self.buzzer.set_state(False)
+            time.sleep(0.05)
     
     def _ai_loop(self):
         """Loop principal de decisões da IA"""
@@ -293,23 +295,25 @@ class AICarController:
                 time.sleep(2)
     
     def _execute_decision(self, decision: Dict):
-        """Executa decisão da IA no hardware"""
+        """Executa decisão da IA no hardware - INVERTIDO FRENTE/TRÁS"""
         action = decision.get('recommended_action', 'stop')
         speed_percent = decision.get('speed', 0)
         max_speed = self.config.get('max_speed', 60)
         
         # Calcular velocidade real (0-2000)
-        speed = int((speed_percent / 100.0) * max_speed * 33.33)  # 2000 = 100%
+        speed = int((speed_percent / 100.0) * max_speed * 33.33)
         
-        # Executar movimento
+        # Executar movimento - INVERTIDO forward/backward
         if action == 'forward':
-            self.motor.set_motor_model(speed, speed, speed, speed)
-        elif action == 'backward':
+            # INVERTIDO: forward agora usa valores negativos
             self.motor.set_motor_model(-speed, -speed, -speed, -speed)
+        elif action == 'backward':
+            # INVERTIDO: backward agora usa valores positivos
+            self.motor.set_motor_model(speed, speed, speed, speed)
         elif action == 'left':
-            self.motor.set_motor_model(-speed, -speed, speed, speed)
-        elif action == 'right':
             self.motor.set_motor_model(speed, speed, -speed, -speed)
+        elif action == 'right':
+            self.motor.set_motor_model(-speed, -speed, speed, speed)
         else:  # stop
             self.motor.set_motor_model(0, 0, 0, 0)
     
@@ -358,10 +362,11 @@ class AICarController:
             self.adc.close_i2c()
         
         if self.buzzer:
+            # Beep de desligamento
+            self.buzzer.set_state(True)
+            time.sleep(0.3)
+            self.buzzer.set_state(False)
             self.buzzer.close()
-        
-        if self.led and LED_AVAILABLE:
-            self.led.colorBlink(0)
         
         print("✓ Sistema encerrado\n")
 

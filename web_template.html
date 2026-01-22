@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Freenove AI Car</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: 'Segoe UI', Arial, sans-serif; 
+            background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+            color: #fff; 
+            min-height: 100vh;
+            padding: 10px;
+        }
+        .container { max-width: 1600px; margin: 0 auto; }
+        h1 { 
+            color: #00ff88; 
+            text-align: center;
+            margin-bottom: 15px;
+            text-shadow: 0 0 20px rgba(0,255,136,0.5);
+            font-size: 1.8em;
+        }
+        
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+        
+        @media (max-width: 1200px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        .left-panel, .right-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        
+        .card { 
+            background: rgba(255,255,255,0.05);
+            backdrop-filter: blur(10px);
+            padding: 15px; 
+            border-radius: 12px; 
+            border: 1px solid rgba(255,255,255,0.1);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }
+        
+        .card h3 {
+            color: #00d4ff;
+            margin-bottom: 12px;
+            border-bottom: 2px solid rgba(0,212,255,0.3);
+            padding-bottom: 8px;
+            font-size: 1.1em;
+        }
+        
+        .camera-card {
+            min-height: 400px;
+        }
+        
+        #video {
+            width: 100%;
+            height: auto;
+            border-radius: 10px;
+            border: 2px solid rgba(0,212,255,0.3);
+            background: rgba(0,0,0,0.3);
+        }
+        
+        .sensor-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+        
+        .sensor-item {
+            background: rgba(0,212,255,0.1);
+            padding: 10px;
+            border-radius: 8px;
+            border-left: 3px solid #00d4ff;
+        }
+        
+        .sensor-label {
+            font-size: 0.85em;
+            color: #00d4ff;
+            margin-bottom: 5px;
+        }
+        
+        .sensor-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #00ff88;
+        }
+        
+        .control-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            max-width: 350px;
+            margin: 15px auto;
+        }
+        
+        button { 
+            padding: 12px 16px; 
+            font-size: 15px; 
+            cursor: pointer; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            transition: all 0.3s;
+            font-weight: bold;
+            user-select: none;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102,126,234,0.4);
+        }
+        
+        button:active { 
+            transform: translateY(0); 
+        }
+        
+        button.active {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            box-shadow: 0 0 20px rgba(240,147,251,0.5);
+        }
+        
+        button.ai-mode {
+            background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
+        }
+        
+        button.stop {
+            background: linear-gradient(135deg, #ff4757 0%, #dc3545 100%);
+        }
+        
+        .modes-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+        }
+        
+        .speed-control {
+            margin-top: 12px;
+        }
+        
+        input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 100%;
+            height: 8px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 5px;
+            outline: none;
+            margin: 8px 0;
+        }
+        
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            background: #667eea;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+        
+        .ai-decision {
+            background: rgba(250,112,154,0.1);
+            padding: 12px;
+            border-radius: 8px;
+            margin-top: 10px;
+            border-left: 3px solid #fa709a;
+        }
+        
+        .ai-decision p {
+            margin: 5px 0;
+            font-size: 0.9em;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #00ff88;
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 5px;
+            font-size: 0.75em;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+        
+        .badge.success { background: #00ff88; color: #000; }
+        .badge.danger { background: #ff4757; color: #fff; }
+        .badge.warning { background: #ffd700; color: #000; }
+        
+        .info { color: #00d4ff; }
+        .warning { color: #ffd700; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 Freenove AI Car <span id="ai-badge"></span></h1>
+        
+        <div class="main-grid">
+            <div class="left-panel">
+                <div class="card camera-card">
+                    <h3>📹 Câmera HD</h3>
+                    <button onclick="toggleCamera()" id="btn-camera">Ativar Câmera</button>
+                    <div style="margin-top: 15px;">
+                        <img id="video" src="" style="display:none;">
+                    </div>
+                </div>
+                
+                <div class="card" id="ai-decision-card" style="display:none;">
+                    <h3>🧠 Última Decisão da IA</h3>
+                    <div class="ai-decision" id="ai-decision-content">
+                        <p><strong>Ação:</strong> <span id="ai-action">--</span></p>
+                        <p><strong>Velocidade:</strong> <span id="ai-speed">--</span>%</p>
+                        <p><strong>Razão:</strong> <span id="ai-reason">--</span></p>
+                        <p><strong>Segurança:</strong> <span id="ai-safety">--</span></p>
+                        <p style="margin-top: 8px; font-size: 0.8em; opacity: 0.7;">
+                            Decisões: <span id="ai-decisions">0</span> | Erros: <span id="ai-errors">0</span>
+                        </p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="right-panel">
+                <div class="card">
+                    <h3><span class="status-indicator"></span>Status do Sistema</h3>
+                    <p id="connection-status" class="info">Conectando...</p>
+                    <div class="sensor-grid" style="margin-top: 12px;">
+                        <div class="sensor-item">
+                            <div class="sensor-label">Bateria</div>
+                            <div class="sensor-value" id="battery">--V</div>
+                        </div>
+                        <div class="sensor-item">
+                            <div class="sensor-label">Modo</div>
+                            <div class="sensor-value" id="mode" style="font-size: 1.2em;">--</div>
+                        </div>
+                    </div>
+                    <p id="ai-status" style="margin-top: 10px; font-size: 0.9em;"></p>
+                </div>
+                
+                <div class="card">
+                    <h3>📡 Sensores</h3>
+                    <div class="sensor-grid">
+                        <div class="sensor-item">
+                            <div class="sensor-label">📊 Ultrassom</div>
+                            <div class="sensor-value" id="ultrasonic">-- cm</div>
+                        </div>
+                        <div class="sensor-item">
+                            <div class="sensor-label">💡 Luz Esq</div>
+                            <div class="sensor-value" id="light-left">-- V</div>
+                        </div>
+                        <div class="sensor-item">
+                            <div class="sensor-label">💡 Luz Dir</div>
+                            <div class="sensor-value" id="light-right">-- V</div>
+                        </div>
+                        <div class="sensor-item">
+                            <div class="sensor-label">🛤️ Infrared</div>
+                            <div class="sensor-value" id="infrared" style="font-size: 1.2em;">--</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3>🎮 Modos de Controle</h3>
+                    <div class="modes-grid">
+                        <button onclick="setMode('manual')" id="btn-manual">🎮 Manual</button>
+                        <button onclick="setMode('ultrasonic')" id="btn-ultrasonic">📡 Ultrassom</button>
+                        <button onclick="setMode('infrared')" id="btn-infrared">🛤️ Linha</button>
+                        <button onclick="setMode('light')" id="btn-light">💡 Luz</button>
+                        <button onclick="setMode('ai')" id="btn-ai" class="ai-mode">🤖 IA Sensores</button>
+                        <button onclick="setMode('ai_vision')" id="btn-ai_vision" class="ai-mode">👁️ IA Visão</button>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3>🕹️ Controle Manual</h3>
+                    <div class="control-grid">
+                        <div></div>
+                        <button onmousedown="move('forward')" onmouseup="stop()" ontouchstart="move('forward')" ontouchend="stop()">⬆️<br>Frente</button>
+                        <div></div>
+                        
+                        <button onmousedown="move('left')" onmouseup="stop()" ontouchstart="move('left')" ontouchend="stop()">⬅️<br>Esq</button>
+                        <button onclick="stop()" class="stop">⏹️<br>Parar</button>
+                        <button onmousedown="move('right')" onmouseup="stop()" ontouchstart="move('right')" ontouchend="stop()">➡️<br>Dir</button>
+                        
+                        <div></div>
+                        <button onmousedown="move('backward')" onmouseup="stop()" ontouchstart="move('backward')" ontouchend="stop()">⬇️<br>Trás</button>
+                        <div></div>
+                    </div>
+                    <div class="speed-control">
+                        <label>Velocidade: <span id="speed-value">50</span>%</label>
+                        <input type="range" id="speed" min="0" max="100" value="50" oninput="updateSpeed(this.value)">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script>
+        const socket = io();
+        let cameraActive = false;
+        let currentMode = 'manual';
+        let speedMultiplier = 0.5;
+        let aiAvailable = false;
+        
+        socket.on('connect', () => {
+            document.getElementById('connection-status').innerHTML = '✓ Conectado ao robô!';
+            document.getElementById('connection-status').className = 'info';
+        });
+        
+        socket.on('disconnect', () => {
+            document.getElementById('connection-status').innerHTML = '✗ Desconectado';
+            document.getElementById('connection-status').className = 'warning';
+        });
+        
+        socket.on('sensor_data', (data) => {
+            document.getElementById('battery').textContent = (data.battery || '--') + 'V';
+            document.getElementById('ultrasonic').textContent = (data.ultrasonic || '--') + ' cm';
+            document.getElementById('light-left').textContent = (data.light_left?.toFixed(2) || '--') + ' V';
+            document.getElementById('light-right').textContent = (data.light_right?.toFixed(2) || '--') + ' V';
+            document.getElementById('infrared').textContent = data.infrared?.join(', ') || '--';
+            document.getElementById('mode').textContent = data.mode || '--';
+            
+            aiAvailable = data.ai_available || false;
+            updateAIBadge(data.ai_enabled, aiAvailable);
+            
+            document.querySelectorAll('.modes-grid button').forEach(b => b.classList.remove('active'));
+            const modeBtn = document.getElementById('btn-' + data.mode);
+            if (modeBtn) modeBtn.classList.add('active');
+            
+            if (data.ai_decision) {
+                showAIDecision(data.ai_decision, data.ai_stats);
+            } else if (data.mode !== 'ai' && data.mode !== 'ai_vision') {
+                document.getElementById('ai-decision-card').style.display = 'none';
+            }
+        });
+        
+        function updateAIBadge(enabled, available) {
+            const badge = document.getElementById('ai-badge');
+            const status = document.getElementById('ai-status');
+            
+            if (!available) {
+                badge.innerHTML = '<span class="badge danger">IA Indisponível</span>';
+                status.innerHTML = '⚠️ Configure GROQ_API_KEY no config.json';
+                status.className = 'warning';
+            } else if (enabled) {
+                badge.innerHTML = '<span class="badge success">IA ATIVA</span>';
+                status.innerHTML = '🤖 IA em operação';
+                status.className = 'info';
+            } else {
+                badge.innerHTML = '<span class="badge warning">IA Pronta</span>';
+                status.innerHTML = 'ℹ️ Selecione um modo de IA para ativar';
+                status.className = 'info';
+            }
+        }
+        
+        function showAIDecision(decision, stats) {
+            document.getElementById('ai-decision-card').style.display = 'block';
+            document.getElementById('ai-action').textContent = decision.recommended_action || '--';
+            document.getElementById('ai-speed').textContent = decision.speed || '--';
+            document.getElementById('ai-reason').textContent = decision.reason || '--';
+            document.getElementById('ai-safety').textContent = decision.safety_level || '--';
+            
+            if (stats) {
+                document.getElementById('ai-decisions').textContent = stats.decisions || 0;
+                document.getElementById('ai-errors').textContent = stats.errors || 0;
+            }
+        }
+        
+        function setMode(mode) {
+            socket.emit('car_mode', { mode: mode });
+            currentMode = mode;
+        }
+        
+        function updateSpeed(value) {
+            speedMultiplier = value / 100;
+            document.getElementById('speed-value').textContent = value;
+        }
+        
+        function move(direction) {
+            if (currentMode !== 'manual') return;
+            
+            const baseSpeed = 2000;
+            const speed = Math.round(baseSpeed * speedMultiplier);
+            
+            let fl = 0, bl = 0, fr = 0, br = 0;
+            
+            // INVERTIDO: forward/backward trocados
+            switch(direction) {
+                case 'forward':
+                    fl = bl = fr = br = -speed;  // INVERTIDO
+                    break;
+                case 'backward':
+                    fl = bl = fr = br = speed;   // INVERTIDO
+                    break;
+                case 'left':
+                    fl = bl = speed;
+                    fr = br = -speed;
+                    break;
+                case 'right':
+                    fl = bl = -speed;
+                    fr = br = speed;
+                    break;
+            }
+            
+            socket.emit('motor_control', { fl, bl, fr, br });
+        }
+        
+        function stop() {
+            socket.emit('motor_control', { fl: 0, bl: 0, fr: 0, br: 0 });
+        }
+        
+        function toggleCamera() {
+            cameraActive = !cameraActive;
+            socket.emit('camera_toggle', { active: cameraActive });
+            const video = document.getElementById('video');
+            const btn = document.getElementById('btn-camera');
+            
+            if (cameraActive) {
+                video.src = '/video_feed';
+                video.style.display = 'block';
+                btn.textContent = 'Desativar Câmera';
+                btn.classList.add('active');
+            } else {
+                video.src = '';
+                video.style.display = 'none';
+                btn.textContent = 'Ativar Câmera';
+                btn.classList.remove('active');
+            }
+        }
+        
+        // Controles de teclado
+        document.addEventListener('keydown', (e) => {
+            if (currentMode !== 'manual') return;
+            
+            switch(e.key) {
+                case 'ArrowUp':
+                case 'w':
+                    move('forward');
+                    break;
+                case 'ArrowDown':
+                case 's':
+                    move('backward');
+                    break;
+                case 'ArrowLeft':
+                case 'a':
+                    move('left');
+                    break;
+                case 'ArrowRight':
+                case 'd':
+                    move('right');
+                    break;
+                case ' ':
+                    stop();
+                    e.preventDefault();
+                    break;
+            }
+        });
+        
+        document.addEventListener('keyup', (e) => {
+            if (currentMode !== 'manual') return;
+            if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'w', 'a', 's', 'd'].includes(e.key)) {
+                stop();
+            }
+        });
+        
+        // Modo manual ativo por padrão
+        document.getElementById('btn-manual').classList.add('active');
+    </script>
+</body>
+</html>
