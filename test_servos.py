@@ -8,8 +8,25 @@ import sys
 import time
 from pathlib import Path
 
-# Adicionar pasta ao path
-sys.path.insert(0, str(Path(__file__).parent))
+# IMPORTANTE: Adicionar pasta atual ao path
+current_dir = Path(__file__).parent.absolute()
+sys.path.insert(0, str(current_dir))
+
+print(f"Diretório atual: {current_dir}")
+print(f"Python path: {sys.path[0]}")
+
+try:
+    from hardware.pca9685 import PCA9685
+    from hardware.servo import Servo
+    print("✓ Imports bem-sucedidos")
+except ImportError as e:
+    print(f"✗ Erro no import: {e}")
+    print("\nVerifique se a estrutura está correta:")
+    print("  hardware/")
+    print("    __init__.py")
+    print("    pca9685.py")
+    print("    servo.py")
+    sys.exit(1)
 
 try:
     from hardware.servo import Servo
