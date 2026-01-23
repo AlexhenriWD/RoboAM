@@ -1,0 +1,72 @@
+# ============================================================================
+# Freenove Smart Car - AI Version
+# Requirements File
+# ============================================================================
+
+# Flask Web Server
+flask==3.0.0
+flask-socketio==5.3.5
+python-socketio==5.10.0
+
+# IA - Groq API Client
+groq==0.4.1
+
+# Computer Vision
+opencv-python==4.8.1.78
+# opencv-contrib-python==4.8.1.78  # Descomente se precisar de módulos extras
+
+# Image Processing
+pillow==10.1.0
+numpy==1.24.3
+
+# Raspberry Pi Hardware (GPIO)
+gpiozero==2.0.1
+RPi.GPIO==0.7.1
+pigpio==1.78
+
+# I2C Communication
+smbus2==0.4.3
+
+# Camera (Raspberry Pi Camera Module)
+picamera2==0.3.16
+# libcamera==0.1.0  # Instalado via apt, não pip
+
+# Utilities
+python-dotenv==1.0.0
+
+# ============================================================================
+# Notas de Instalação:
+# ============================================================================
+#
+# 1. Para Raspberry Pi, instale primeiro as dependências do sistema:
+#    sudo apt-get update
+#    sudo apt-get install -y python3-pip python3-opencv
+#    sudo apt-get install -y libatlas-base-dev libhdf5-dev libhdf5-serial-dev
+#    sudo apt-get install -y libjasper-dev libqtgui4 libqt4-test
+#    sudo apt-get install -y i2c-tools python3-smbus
+#
+# 2. Para Picamera2 (Raspberry Pi 5 ou superior):
+#    sudo apt-get install -y python3-picamera2
+#
+# 3. Habilite I2C e Camera na Raspberry Pi:
+#    sudo raspi-config
+#    -> Interface Options -> I2C -> Enable
+#    -> Interface Options -> Camera -> Enable
+#
+# 4. Instale este requirements.txt:
+#    pip3 install -r requirements.txt
+#
+# 5. Configure sua GROQ_API_KEY no arquivo config.json
+#
+# ============================================================================
+# Versões Alternativas (se houver problemas de compatibilidade):
+# ============================================================================
+#
+# Para Raspberry Pi 3/4 (32-bit):
+# numpy==1.21.6
+# opencv-python==4.5.5.64
+#
+# Para desenvolvimento em PC (sem hardware):
+# Comente: RPi.GPIO, pigpio, gpiozero, smbus2, picamera2
+#
+# ============================================================================
