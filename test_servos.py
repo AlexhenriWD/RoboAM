@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 try:
-    from servo import Servo
+    from hardware.servo import Servo
     SERVO_AVAILABLE = True
 except ImportError as e:
     print(f"❌ Erro ao importar servo.py: {e}")
