@@ -15,7 +15,7 @@ current_dir = Path(__file__).parent.absolute()
 sys.path.insert(0, str(current_dir))
 
 try:
-    from hardware.servo import Servo
+    from servo import Servo
     SERVO_AVAILABLE = True
 except ImportError as e:
     print(f"⚠️ Erro ao importar hardware: {e}")
