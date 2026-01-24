@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 """
 Servidor Flask para controle de servos via web
-Execute no Raspberry Pi: python3 servo_server.py
+
+INSTALAÇÃO (Raspberry Pi OS):
+  sudo apt update
+  sudo apt install python3-flask python3-flask-cors
+  
+  OU (se flask-cors não estiver no apt):
+  sudo apt install python3-flask
+  sudo pip3 install flask-cors --break-system-packages
+
+EXECUÇÃO:
+  python3 servo_server.py
 """
 
+import time
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import sys
@@ -15,7 +26,7 @@ current_dir = Path(__file__).parent.absolute()
 sys.path.insert(0, str(current_dir))
 
 try:
-    from servo import Servo
+    from hardware.servo import Servo
     SERVO_AVAILABLE = True
 except ImportError as e:
     print(f"⚠️ Erro ao importar hardware: {e}")
@@ -107,9 +118,11 @@ def stop_servos():
         }), 500
     
     try:
-        # Retornar todos para posição neutra
-        for channel in range(4):
+        # Retornar servos para posição neutra
+        # Canais: 0, 1, 2, 4 (não tem canal 3)
+        for channel in [0, 1, 2, 4]:
             servo_controller.set_servo_pwm(str(channel), 90)
+            time.sleep(0.3)  # Delay entre cada servo
         
         print("🛑 Todos os servos retornados para 90°")
         
@@ -138,19 +151,26 @@ def test_servo():
         data = request.get_json()
         channel = int(data.get('channel', 0))
         
+        # Validar canal
         if channel < 0 or channel > 7:
             return jsonify({
                 'success': False,
                 'error': 'Canal inválido (0-7)'
             }), 400
         
-        # Sequência de teste
+        if channel == 3:
+            return jsonify({
+                'success': False,
+                'error': 'Canal 3 não utilizado. Use 0,1,2 ou 4'
+            }), 400
+        
+        # Sequência de teste com delay de 2s
         import time
         sequence = [90, 45, 90, 135, 90]
         
         for angle in sequence:
             servo_controller.set_servo_pwm(str(channel), angle)
-            time.sleep(0.5)
+            time.sleep(2.0)  # 2 segundos entre cada movimento
         
         print(f"✓ Servo {channel} testado")
         
