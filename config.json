@@ -1,0 +1,38 @@
+{
+  "ai_mode": "autonomous",
+  "decision_interval": 2.0,
+  "max_speed": 50,
+  "safety_distance": 30,
+  "detection_distance": 50,
+  
+  "camera_enabled": true,
+  "arm_enabled": true,
+  
+  "external_ai_url": "http://localhost:1234",
+  
+  "arm_limits": {
+    "base": {"min": 0, "max": 180, "home": 90},
+    "shoulder": {"min": 75, "max": 175, "home": 90},
+    "elbow": {"min": 70, "max": 145, "home": 90},
+    "gripper": {"min": 40, "max": 100, "home": 70}
+  },
+  
+  "behaviors": {
+    "object_detected": {
+      "action": "investigate",
+      "arm_response": "point_forward",
+      "camera_activate": true
+    },
+    "object_close": {
+      "action": "grab_attempt",
+      "distance_threshold": 20,
+      "arm_response": "grab"
+    },
+    "idle": {
+      "action": "explore",
+      "arm_response": "rest"
+    }
+  },
+  
+  "groq_api_key": ""
+}
