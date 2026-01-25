@@ -364,6 +364,8 @@ class EvaRobotCore:
                 self.ultrasonic = Ultrasonic()
             except:
                 pass
+    
+    def test_ultrasonic_continuous(self, duration: int = 10):
         """
         Testa ultrasonic continuamente por alguns segundos
         
