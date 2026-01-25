@@ -228,9 +228,12 @@ class EvaRobotCore:
                 print(f"  ⚠️  Pi Camera falhou: {e}")
                 self.picam = None
     
-    def read_sensors(self) -> Dict[str, Any]:
+    def read_sensors(self, verbose: bool = False) -> Dict[str, Any]:
         """
         Lê todos os sensores disponíveis
+        
+        Args:
+            verbose: Se True, mostra erros detalhados
         
         Returns:
             Dicionário com dados dos sensores
@@ -247,8 +250,12 @@ class EvaRobotCore:
             try:
                 distance = self.ultrasonic.get_distance()
                 data['ultrasonic_cm'] = round(distance, 2) if distance else None
-            except:
-                pass
+                if verbose:
+                    print(f"  🔊 Ultrasonic raw: {distance}")
+            except Exception as e:
+                if verbose:
+                    print(f"  ❌ Erro Ultrasonic: {e}")
+                data['ultrasonic_cm'] = None
         
         # Bateria
         if self.adc:
@@ -256,18 +263,94 @@ class EvaRobotCore:
                 voltage = self.adc.read_adc(2)
                 multiplier = 3 if self.adc.pcb_version == 1 else 2
                 data['battery_v'] = round(voltage * multiplier, 2)
-            except:
-                pass
+                if verbose:
+                    print(f"  🔋 Bateria raw: {voltage}V x{multiplier} = {data['battery_v']}V")
+            except Exception as e:
+                if verbose:
+                    print(f"  ❌ Erro ADC: {e}")
         
         # Posição do braço
         if self.arm:
             try:
                 data['arm_position'] = self.arm.get_current_position()
-            except:
-                pass
+            except Exception as e:
+                if verbose:
+                    print(f"  ❌ Erro Braço: {e}")
         
         self.sensor_data = data
         return data
+    
+    def test_ultrasonic_continuous(self, duration: int = 10):
+        """
+        Testa ultrasonic continuamente por alguns segundos
+        
+        Args:
+            duration: Duração do teste em segundos
+        """
+        if not self.ultrasonic:
+            print("❌ Ultrasonic não disponível")
+            return
+        
+        print(f"\n🔊 Testando Ultrasonic por {duration} segundos...")
+        print("📏 Coloque um objeto na frente do sensor (pinos trigger/echo)")
+        print("=" * 60)
+        
+        start = time.time()
+        readings = []
+        errors = 0
+        
+        try:
+            while (time.time() - start) < duration:
+                try:
+                    distance = self.ultrasonic.get_distance()
+                    
+                    if distance is not None:
+                        readings.append(distance)
+                        status = "✅"
+                        if distance < 10:
+                            status = "🔴 MUITO PERTO!"
+                        elif distance < 30:
+                            status = "🟡 Perto"
+                        elif distance < 100:
+                            status = "🟢 Médio"
+                        else:
+                            status = "⚪ Longe"
+                        
+                        print(f"  {status} Distância: {distance:6.2f} cm")
+                    else:
+                        errors += 1
+                        print(f"  ❌ Leitura falhou (erro #{errors})")
+                    
+                    time.sleep(0.3)
+                    
+                except Exception as e:
+                    errors += 1
+                    print(f"  ❌ Erro: {e}")
+                    time.sleep(0.5)
+        
+        except KeyboardInterrupt:
+            print("\n⚠️  Teste interrompido")
+        
+        # Estatísticas
+        print("\n" + "=" * 60)
+        print("📊 ESTATÍSTICAS DO TESTE:")
+        print(f"  ✅ Leituras bem-sucedidas: {len(readings)}")
+        print(f"  ❌ Erros: {errors}")
+        
+        if readings:
+            print(f"  📏 Distância mínima: {min(readings):.2f} cm")
+            print(f"  📏 Distância máxima: {max(readings):.2f} cm")
+            print(f"  📏 Distância média: {sum(readings)/len(readings):.2f} cm")
+        else:
+            print("\n⚠️  NENHUMA LEITURA VÁLIDA!")
+            print("\n🔧 POSSÍVEIS PROBLEMAS:")
+            print("  1. Pinos trigger/echo invertidos")
+            print("  2. Sensor não conectado")
+            print("  3. Sensor defeituoso")
+            print("  4. GPIO pins errados (padrão: trigger=27, echo=22)")
+            print("\n💡 Verifique as conexões físicas!")
+        
+        print("=" * 60 + "\n")
     
     def get_picam_frame(self):
         """Captura frame da Pi Camera"""
@@ -439,6 +522,7 @@ def test_menu():
             
             print("\n📊 SENSORES:")
             print("  i - Ler sensores")
+            print("  u - Testar Ultrasonic (10s contínuo)")
             
             print("\n❌ SAIR:")
             print("  q - Sair")
@@ -508,12 +592,15 @@ def test_menu():
             
             # Sensores
             elif cmd == 'i':
-                data = robot.read_sensors()
+                data = robot.read_sensors(verbose=True)
                 print("\n📊 DADOS DOS SENSORES:")
                 print(f"  🔊 Ultrasonic: {data.get('ultrasonic_cm', 'N/A')} cm")
                 print(f"  🔋 Bateria: {data.get('battery_v', 'N/A')} V")
                 if data.get('arm_position'):
                     print(f"  🦾 Braço: {len(data['arm_position'])} servos ativos")
+            
+            elif cmd == 'u':
+                robot.test_ultrasonic_continuous(duration=10)
             
             # Sair
             elif cmd == 'q':
