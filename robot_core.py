@@ -686,7 +686,7 @@ def test_menu():
             elif cmd == 'u':
                 robot.test_ultrasonic_continuous(duration=10)
             
-            elif cmd == 'd':
+            elif cmd == 'e':
                 robot.test_ultrasonic_hardware()
             
             # Sair
