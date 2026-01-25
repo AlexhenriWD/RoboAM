@@ -1,314 +1,372 @@
 #!/usr/bin/env python3
 """
-Controlador do Braço Robótico com Garra
-Sistema otimizado com limites seguros e proteção contra sobrecarga
+ArmController (EVA Head) - Controlador do braço como "cabeça"
+✅ Remove travas falsas ("já está na posição") via force=True
+✅ Movimento suave incremental (move_smooth)
+✅ Suporte opcional para desabilitar garra (camera head)
+✅ Sequências com modo smooth
 """
 
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple, List
 from servo import Servo
 
 
 class ArmController:
-    """Controlador seguro do braço robótico"""
-    
-    def __init__(self):
+    """Controlador seguro do braço robótico (adaptado para cabeça/câmera)."""
+
+    def __init__(
+        self,
+        enable_gripper: bool = False,   # ✅ por padrão: garra desativada (virar cabeça)
+        min_delay: float = 0.15,        # menor que 0.3 para responsividade (ajuste se aquecer)
+        tolerance_deg: int = 2
+    ):
         self.servo = Servo()
-        
-        # Configuração SEGURA baseada nos testes
-        self.servos = {
-            0: {  # Base (Rotação)
-                'name': 'Base',
-                'min': 0,
-                'max': 180,
-                'home': 90,
-                'current': 90
+        self.enable_gripper = enable_gripper
+        self.min_delay = float(min_delay)
+        self.tolerance_deg = int(tolerance_deg)
+
+        # ====== LIMITES (AJUSTE AQUI) ======
+        # Você falou que ombro/cotovelo agora podem ir até 180.
+        # Mantive min seguros, mas soltei max pra 180 conforme seu plano.
+        self.servos: Dict[int, Dict] = {
+            0: {  # Base (Yaw)
+                "name": "Base",
+                "min": 0,
+                "max": 180,
+                "home": 90,
+                "current": 90,
+                "last_sent": None,
             },
-            1: {  # Ombro (Elevação)
-                'name': 'Ombro',
-                'min': 75,
-                'max': 175,
-                'home': 90,
-                'current': 90
+            1: {  # Ombro (Pitch / altura)
+                "name": "Ombro",
+                "min": 0,
+                "max": 180,
+                "home": 90,
+                "current": 90,
+                "last_sent": None,
             },
             2: {  # Cotovelo
-                'name': 'Cotovelo',
-                'min': 70,
-                'max': 145,
-                'home': 90,
-                'current': 90
+                "name": "Cotovelo",
+                "min": 0,
+                "max": 180,
+                "home": 90,
+                "current": 90,
+                "last_sent": None,
             },
-            4: {  # Garra
-                'name': 'Garra',
-                'min': 40,   # Aberta
-                'max': 100,  # Fechada
-                'home': 70,  # Meio-aberta
-                'current': 70
-            }
+            3: {  # Cabeça/Câmera extra (se existir fisicamente)
+                "name": "Cabeça",
+                "min": 0,
+                "max": 180,
+                "home": 90,
+                "current": 90,
+                "last_sent": None,
+            },
         }
-        
-        # Delay mínimo entre movimentos (proteção)
-        self.min_delay = 0.3
-        self.last_move_time = {ch: 0 for ch in self.servos.keys()}
-        
-        # Inicializar em posição home
-        self.home_position(silent=True)
-    
-    def _validate_move(self, channel: int, angle: int) -> tuple[bool, str]:
-        """Valida se o movimento é seguro"""
-        if channel not in self.servos:
-            return False, f"Canal {channel} inválido"
-        
-        servo = self.servos[channel]
-        
-        # Verificar limites
-        if angle < servo['min'] or angle > servo['max']:
-            return False, f"{servo['name']}: ângulo fora dos limites ({servo['min']}° - {servo['max']}°)"
-        
-        # Verificar se já está na posição (evita sobrecarga)
-        if abs(servo['current'] - angle) < 2:  # Tolerância de 2 graus
-            return False, f"{servo['name']}: já está na posição {angle}°"
-        
-        # Verificar delay mínimo
-        elapsed = time.time() - self.last_move_time[channel]
-        if elapsed < self.min_delay:
-            wait_time = self.min_delay - elapsed
-            time.sleep(wait_time)
-        
-        return True, "OK"
-    
-    def move_servo(self, channel: int, angle: int, delay: float = None) -> Dict:
-        """Move um servo com validação e proteção"""
-        # Validar movimento
-        valid, message = self._validate_move(channel, angle)
-        if not valid:
-            return {
-                'success': False,
-                'channel': channel,
-                'error': message,
-                'current_angle': self.servos[channel]['current']
+
+        # Garra (canal 4) opcional
+        if self.enable_gripper:
+            self.servos[4] = {
+                "name": "Garra",
+                "min": 40,
+                "max": 100,
+                "home": 70,
+                "current": 70,
+                "last_sent": None,
             }
-        
+
+        self.last_move_time = {ch: 0.0 for ch in self.servos.keys()}
+
+        # Inicializar em home (sem spam)
+        self.home_position(silent=True, force=True)
+
+    # -------------------------
+    # Utilitários
+    # -------------------------
+
+    def _clamp(self, channel: int, angle: int) -> int:
+        s = self.servos[channel]
+        return max(s["min"], min(s["max"], int(angle)))
+
+    def _wait_min_delay(self, channel: int):
+        elapsed = time.time() - self.last_move_time.get(channel, 0.0)
+        if elapsed < self.min_delay:
+            time.sleep(self.min_delay - elapsed)
+
+    def _validate_move(self, channel: int, angle: int, force: bool) -> Tuple[bool, str, int]:
+        """Valida se o movimento é seguro. Retorna (ok, msg, clamped_angle)."""
+        if channel not in self.servos:
+            return False, f"Canal {channel} inválido", angle
+
+        angle = self._clamp(channel, angle)
+        servo = self.servos[channel]
+
+        # ✅ NÃO travar por 'já está na posição' quando force=True
+        if not force:
+            if abs(servo["current"] - angle) < self.tolerance_deg:
+                return False, f"{servo['name']}: já está na posição {angle}°", angle
+
+        return True, "OK", angle
+
+    # -------------------------
+    # Movimento básico
+    # -------------------------
+
+    def move_servo(
+        self,
+        channel: int,
+        angle: int,
+        delay: Optional[float] = None,
+        *,
+        force: bool = False,
+        update_virtual: bool = True
+    ) -> Dict:
+        """
+        Move um servo.
+        - force=True: reenvia mesmo se 'current' estiver igual (corrige 'travado logicamente')
+        - update_virtual=False: útil se você quiser testar sem assumir que mexeu
+        """
+        ok, msg, angle = self._validate_move(channel, angle, force=force)
+        if not ok:
+            return {
+                "success": False,
+                "channel": channel,
+                "error": msg,
+                "current_angle": self.servos[channel]["current"],
+                "target_angle": angle
+            }
+
         try:
-            # Executar movimento
-            self.servo.set_servo_pwm(str(channel), angle)
-            self.servos[channel]['current'] = angle
+            self._wait_min_delay(channel)
+
+            self.servo.set_servo_pwm(str(channel), int(angle))
             self.last_move_time[channel] = time.time()
-            
-            # Aguardar delay se especificado
+            self.servos[channel]["last_sent"] = int(angle)
+
+            if update_virtual:
+                self.servos[channel]["current"] = int(angle)
+
             if delay and delay > 0:
                 time.sleep(delay)
-            
+
             return {
-                'success': True,
-                'channel': channel,
-                'angle': angle,
-                'servo_name': self.servos[channel]['name']
+                "success": True,
+                "channel": channel,
+                "angle": int(angle),
+                "servo_name": self.servos[channel]["name"],
             }
-            
+
         except Exception as e:
             return {
-                'success': False,
-                'channel': channel,
-                'error': str(e)
+                "success": False,
+                "channel": channel,
+                "error": str(e),
+                "target_angle": int(angle)
             }
-    
+
+    def move_smooth(
+        self,
+        channel: int,
+        target: int,
+        *,
+        step: int = 2,
+        step_delay: float = 0.03,
+        force: bool = True
+    ) -> bool:
+        """
+        Movimento suave incremental até o alvo.
+        Ideal para "ângulo de captura" e transições naturais.
+        """
+        if channel not in self.servos:
+            print(f"  ✗ Canal {channel} inválido")
+            return False
+
+        target = self._clamp(channel, target)
+        current = int(self.servos[channel]["current"])
+
+        if current == target and not force:
+            return True
+
+        direction = 1 if target > current else -1
+        step = max(1, int(step))
+
+        angle = current
+        while angle != target:
+            next_angle = angle + direction * step
+            if (direction == 1 and next_angle > target) or (direction == -1 and next_angle < target):
+                next_angle = target
+
+            r = self.move_servo(channel, next_angle, delay=None, force=force)
+            if not r["success"]:
+                print(f"  ✗ Erro: {r.get('error')}")
+                return False
+
+            time.sleep(step_delay)
+            angle = next_angle
+
+        return True
+
+    # -------------------------
+    # Posições e comportamentos
+    # -------------------------
+
     def get_current_position(self) -> Dict:
-        """Retorna posição atual de todos os servos"""
         return {
             ch: {
-                'name': info['name'],
-                'angle': info['current'],
-                'min': info['min'],
-                'max': info['max']
+                "name": info["name"],
+                "angle": info["current"],
+                "min": info["min"],
+                "max": info["max"],
+                "last_sent": info.get("last_sent"),
             }
             for ch, info in self.servos.items()
         }
-    
-    def home_position(self, silent: bool = False) -> bool:
-        """Retorna todos os servos para posição home"""
+
+    def home_position(self, silent: bool = False, force: bool = False) -> bool:
         if not silent:
-            print("\n🏠 Retornando para posição HOME...")
-        
-        success = True
-        for channel in sorted(self.servos.keys()):
-            home_angle = self.servos[channel]['home']
-            result = self.move_servo(channel, home_angle, delay=0.4)
-            
+            print("\n🏠 Indo para HOME...")
+
+        ok = True
+        for ch in sorted(self.servos.keys()):
+            home = int(self.servos[ch]["home"])
+            r = self.move_servo(ch, home, delay=0.2, force=force)
             if not silent:
-                if result['success']:
-                    print(f"  ✓ {result['servo_name']}: {home_angle}°")
+                if r["success"]:
+                    print(f"  ✓ {r['servo_name']}: {home}°")
                 else:
-                    print(f"  ✗ {result.get('error')}")
-                    success = False
-        
-        if not silent and success:
-            print("✓ Posição HOME concluída!\n")
-        
-        return success
-    
-    def open_gripper(self) -> Dict:
-        """Abre a garra completamente"""
-        return self.move_servo(4, self.servos[4]['min'], delay=0.5)
-    
-    def close_gripper(self) -> Dict:
-        """Fecha a garra completamente"""
-        return self.move_servo(4, self.servos[4]['max'], delay=0.5)
-    
-    def set_gripper(self, percentage: int) -> Dict:
-        """
-        Define abertura da garra por porcentagem
-        0% = totalmente aberta, 100% = totalmente fechada
-        """
-        if percentage < 0 or percentage > 100:
-            return {'success': False, 'error': 'Porcentagem deve ser 0-100'}
-        
-        servo_min = self.servos[4]['min']
-        servo_max = self.servos[4]['max']
-        angle = int(servo_min + (servo_max - servo_min) * (percentage / 100.0))
-        
-        return self.move_servo(4, angle, delay=0.3)
-    
-    def point_forward(self) -> bool:
-        """Posição de apontar para frente"""
-        print("👉 Apontando para frente...")
-        moves = [
-            (0, 90),   # Base centro
-            (1, 120),  # Ombro elevado
-            (2, 90),   # Cotovelo reto
-            (4, 40)    # Garra aberta
+                    print(f"  ✗ {r.get('error')}")
+                    ok = False
+
+        if not silent and ok:
+            print("✓ HOME concluído!\n")
+        return ok
+
+    def look_forward(self, smooth: bool = True) -> bool:
+        """Cabeça olhando para frente."""
+        print("👉 Olhando para frente...")
+
+        # Ajuste fino conforme sua mecânica real:
+        targets = [
+            (0, 90),   # yaw
+            (1, 110),  # pitch/ombro
+            (2, 90),   # cotovelo
+            (3, 90),   # cabeça/câmera
         ]
-        return self._execute_sequence(moves)
-    
-    def grab_position(self) -> bool:
-        """Posição para pegar objetos"""
-        print("🤲 Posição de captura...")
-        moves = [
-            (0, 90),   # Base centro
-            (1, 140),  # Ombro baixo
-            (2, 110),  # Cotovelo flexionado
-            (4, 40)    # Garra aberta
+        return self._execute_sequence(targets, smooth=smooth)
+
+    def look_down(self, smooth: bool = True) -> bool:
+        """Pose para 'captura' / olhar mais para baixo (ângulo de captura)."""
+        print("🔎 Ajustando ângulo de captura...")
+        targets = [
+            (1, 140),
+            (2, 120),
         ]
-        return self._execute_sequence(moves)
-    
-    def rest_position(self) -> bool:
-        """Posição de descanso (compacta)"""
-        print("😴 Posição de descanso...")
-        moves = [
-            (4, 100),  # Fechar garra primeiro
-            (2, 70),   # Recolher cotovelo
-            (1, 75),   # Baixar ombro
-            (0, 90)    # Base centro
-        ]
-        return self._execute_sequence(moves)
-    
+        return self._execute_sequence(targets, smooth=smooth)
+
+    def scan_left_right(self, times: int = 2, amplitude: int = 25) -> bool:
+        """Varredura simples: yaw esquerda/direita."""
+        print("👀 Varredura...")
+        base = int(self.servos[0]["current"])
+        left = self._clamp(0, base - abs(amplitude))
+        right = self._clamp(0, base + abs(amplitude))
+
+        for _ in range(max(1, int(times))):
+            if not self.move_smooth(0, left, step=3, step_delay=0.02):
+                return False
+            if not self.move_smooth(0, right, step=3, step_delay=0.02):
+                return False
+
+        return self.move_smooth(0, base, step=3, step_delay=0.02)
+
     def wave_gesture(self) -> bool:
-        """Acena (movimento de cumprimento)"""
-        print("👋 Acenando...")
-        base_pos = self.servos[0]['current']
-        
-        # Preparar para acenar
-        self.move_servo(1, 120, delay=0.4)
-        self.move_servo(2, 90, delay=0.4)
-        self.move_servo(4, 40, delay=0.4)
-        
-        # Movimento de aceno
+        """
+        Aceno sem garra: usa yaw (servo 0) como 'cumprimento'.
+        """
+        print("👋 Acenando... (sem garra, sem crimes mecânicos)")
+        base = int(self.servos[0]["current"])
+
+        # Preparar pose "social"
+        self._execute_sequence([(1, 115), (2, 90)], smooth=True)
+
         for _ in range(3):
-            self.move_servo(0, base_pos - 20, delay=0.3)
-            self.move_servo(0, base_pos + 20, delay=0.3)
-        
-        # Retornar
-        self.move_servo(0, base_pos, delay=0.3)
+            if not self.move_smooth(0, self._clamp(0, base - 18), step=3, step_delay=0.02):
+                return False
+            if not self.move_smooth(0, self._clamp(0, base + 18), step=3, step_delay=0.02):
+                return False
+
+        self.move_smooth(0, base, step=3, step_delay=0.02)
         print("✓ Aceno concluído!")
         return True
-    
-    def _execute_sequence(self, moves: list, delay: float = 0.4) -> bool:
-        """Executa uma sequência de movimentos"""
-        for channel, angle in moves:
-            result = self.move_servo(channel, angle, delay=delay)
-            if not result['success']:
-                print(f"  ✗ Erro: {result.get('error')}")
-                return False
+
+    # -------------------------
+    # Execução de sequências
+    # -------------------------
+
+    def _execute_sequence(
+        self,
+        moves: List[tuple],
+        *,
+        delay: float = 0.12,
+        smooth: bool = False
+    ) -> bool:
+        for ch, angle in moves:
+            if smooth:
+                ok = self.move_smooth(ch, angle, step=2, step_delay=0.02, force=True)
+                if not ok:
+                    return False
+            else:
+                r = self.move_servo(ch, angle, delay=delay, force=True)
+                if not r["success"]:
+                    print(f"  ✗ Erro: {r.get('error')}")
+                    return False
+
         print("✓ Sequência concluída!")
         return True
-    
+
     def cleanup(self):
-        """Finaliza de forma segura"""
-        print("\n🔧 Finalizando braço robótico...")
-        # Apenas retorna para home se não estiver já lá
-        for channel, info in self.servos.items():
-            if abs(info['current'] - info['home']) > 5:
-                self.move_servo(channel, info['home'], delay=0.3)
+        print("\n🔧 Finalizando braço...")
+        # tenta ir pra home só se estiver bem longe (evita ficar “brigando”)
+        for ch, info in self.servos.items():
+            if abs(int(info["current"]) - int(info["home"])) > 5:
+                self.move_servo(ch, int(info["home"]), delay=0.1, force=True)
         print("✓ Braço finalizado com segurança\n")
 
 
-if __name__ == '__main__':
-    """Teste do controlador"""
-    arm = ArmController()
-    
+if __name__ == "__main__":
+    arm = ArmController(enable_gripper=False)
+
     try:
-        print("\n" + "="*60)
-        print("🦾 TESTE DO CONTROLADOR DO BRAÇO")
-        print("="*60)
-        
-        # Menu interativo
+        print("\n" + "=" * 60)
+        print("🦾 TESTE DO CONTROLADOR (EVA HEAD)")
+        print("=" * 60)
+
         while True:
-            print("\n" + "="*60)
-            print("COMANDOS:")
-            print("  1 - Posição HOME")
-            print("  2 - Abrir garra")
-            print("  3 - Fechar garra")
-            print("  4 - Apontar para frente")
-            print("  5 - Posição de captura")
-            print("  6 - Posição de descanso")
-            print("  7 - Acenar")
-            print("  8 - Mover servo manual")
-            print("  9 - Ver posição atual")
+            print("\nCOMANDOS:")
+            print("  1 - HOME")
+            print("  2 - Look Forward")
+            print("  3 - Look Down (captura)")
+            print("  4 - Scan")
+            print("  5 - Wave")
             print("  0 - Sair")
-            print("="*60)
-            
-            choice = input("\nEscolha: ").strip()
-            
-            if choice == '1':
+
+            op = input("Escolha: ").strip()
+
+            if op == "1":
                 arm.home_position()
-            elif choice == '2':
-                result = arm.open_gripper()
-                print(f"{'✓' if result['success'] else '✗'} Garra aberta")
-            elif choice == '3':
-                result = arm.close_gripper()
-                print(f"{'✓' if result['success'] else '✗'} Garra fechada")
-            elif choice == '4':
-                arm.point_forward()
-            elif choice == '5':
-                arm.grab_position()
-            elif choice == '6':
-                arm.rest_position()
-            elif choice == '7':
+            elif op == "2":
+                arm.look_forward(smooth=True)
+            elif op == "3":
+                arm.look_down(smooth=True)
+            elif op == "4":
+                arm.scan_left_right(times=2)
+            elif op == "5":
                 arm.wave_gesture()
-            elif choice == '8':
-                print("\nServos disponíveis:")
-                for ch, info in arm.servos.items():
-                    print(f"  {ch} - {info['name']} ({info['min']}° - {info['max']}°)")
-                try:
-                    ch = int(input("Canal: "))
-                    angle = int(input("Ângulo: "))
-                    result = arm.move_servo(ch, angle)
-                    print(f"{'✓' if result['success'] else '✗'} {result.get('error', 'Movimento realizado')}")
-                except ValueError:
-                    print("✗ Entrada inválida")
-            elif choice == '9':
-                pos = arm.get_current_position()
-                print("\n📍 POSIÇÃO ATUAL:")
-                for ch, info in pos.items():
-                    print(f"  {info['name']}: {info['angle']}° ({info['min']}° - {info['max']}°)")
-            elif choice == '0':
+            elif op == "0":
                 break
             else:
-                print("✗ Opção inválida")
-    
+                print("Opção inválida.")
+
     except KeyboardInterrupt:
-        print("\n\n⚠️  Ctrl+C detectado")
-    
+        pass
     finally:
         arm.cleanup()
-        print("✓ Programa encerrado\n")
