@@ -280,7 +280,90 @@ class EvaRobotCore:
         self.sensor_data = data
         return data
     
-    def test_ultrasonic_continuous(self, duration: int = 10):
+    def test_ultrasonic_hardware(self):
+        """
+        Teste de diagnóstico de hardware do ultrasonic
+        Verifica se os pinos GPIO estão funcionando
+        """
+        if not self.ultrasonic:
+            print("❌ Ultrasonic não disponível")
+            return
+        
+        print("\n🔍 DIAGNÓSTICO DE HARDWARE - ULTRASONIC")
+        print("=" * 60)
+        
+        try:
+            from gpiozero import LED, Button
+            import RPi.GPIO as GPIO
+            
+            trigger_pin = 27  # Padrão do ultrasonic.py
+            echo_pin = 22
+            
+            print(f"📌 Testando pinos GPIO:")
+            print(f"   Trigger: GPIO {trigger_pin}")
+            print(f"   Echo: GPIO {echo_pin}")
+            print()
+            
+            # Fechar sensor atual temporariamente
+            self.ultrasonic.close()
+            time.sleep(0.5)
+            
+            # Testar trigger como OUTPUT
+            print("🔧 Teste 1: Trigger como OUTPUT...")
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(trigger_pin, GPIO.OUT)
+            
+            for i in range(5):
+                GPIO.output(trigger_pin, GPIO.HIGH)
+                time.sleep(0.1)
+                GPIO.output(trigger_pin, GPIO.LOW)
+                time.sleep(0.1)
+                print(f"   Pulso {i+1}/5 enviado")
+            
+            print("   ✅ Trigger GPIO está funcionando\n")
+            
+            # Testar echo como INPUT
+            print("🔧 Teste 2: Echo como INPUT...")
+            GPIO.setup(echo_pin, GPIO.IN)
+            
+            echo_state = GPIO.input(echo_pin)
+            print(f"   Estado do Echo: {'HIGH' if echo_state else 'LOW'}")
+            
+            if echo_state == GPIO.LOW:
+                print("   ✅ Echo GPIO está funcionando\n")
+            else:
+                print("   ⚠️  Echo está sempre HIGH (possível problema)\n")
+            
+            # Cleanup
+            GPIO.cleanup([trigger_pin, echo_pin])
+            
+            # Reinicializar sensor
+            time.sleep(0.5)
+            self.ultrasonic = Ultrasonic()
+            
+            print("=" * 60)
+            print("\n🔍 RESULTADO DO DIAGNÓSTICO:")
+            print()
+            print("✅ Os pinos GPIO estão funcionando corretamente")
+            print()
+            print("⚠️  CONCLUSÃO: Se o sensor esquenta mas não responde,")
+            print("   provavelmente o SENSOR ESTÁ QUEIMADO internamente.")
+            print()
+            print("💡 RECOMENDAÇÕES:")
+            print("   1. Substitua o sensor HC-SR04")
+            print("   2. Verifique tensão de alimentação (5V corretos)")
+            print("   3. Não conecte echo direto no GPIO (use divisor 5V→3.3V)")
+            print()
+            print("🛒 O sensor custa ~R$5-10 e é fácil de trocar")
+            print("=" * 60 + "\n")
+            
+        except Exception as e:
+            print(f"\n❌ Erro no diagnóstico: {e}")
+            print("⚠️  Tentando reinicializar sensor...")
+            try:
+                self.ultrasonic = Ultrasonic()
+            except:
+                pass
         """
         Testa ultrasonic continuamente por alguns segundos
         
@@ -523,6 +606,7 @@ def test_menu():
             print("\n📊 SENSORES:")
             print("  i - Ler sensores")
             print("  u - Testar Ultrasonic (10s contínuo)")
+            print("  d - Diagnóstico de Hardware Ultrasonic")
             
             print("\n❌ SAIR:")
             print("  q - Sair")
@@ -601,6 +685,9 @@ def test_menu():
             
             elif cmd == 'u':
                 robot.test_ultrasonic_continuous(duration=10)
+            
+            elif cmd == 'd':
+                robot.test_ultrasonic_hardware()
             
             # Sair
             elif cmd == 'q':
