@@ -192,7 +192,30 @@ class EvaRobotCore:
         """Inicializa as câmeras disponíveis"""
         print("\n📷 Inicializando câmeras...")
         
-        # Raspberry Pi Camera
+        # USB Webcam PRIMEIRO (índice 1 = REDRAGON)
+        if OPENCV_OK:
+            try:
+                self.webcam = cv2.VideoCapture(1)  # /dev/video1 = REDRAGON
+                if self.webcam.isOpened():
+                    self.webcam.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                    self.webcam.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                    self.webcam.set(cv2.CAP_PROP_FPS, 30)
+                    # Testar captura
+                    ret, _ = self.webcam.read()
+                    if ret:
+                        print("  ✅ USB Webcam REDRAGON detectada (/dev/video1)")
+                    else:
+                        self.webcam.release()
+                        self.webcam = None
+                        print("  ⚠️  Webcam não respondeu")
+                else:
+                    self.webcam = None
+                    print("  ⚠️  Webcam USB não abriu")
+            except Exception as e:
+                print(f"  ⚠️  Webcam falhou: {e}")
+                self.webcam = None
+        
+        # Raspberry Pi Camera (usa Picamera2, não OpenCV)
         if PICAM_OK:
             try:
                 self.picam = Picamera2()
@@ -200,26 +223,10 @@ class EvaRobotCore:
                     main={"size": (1280, 720)}
                 )
                 self.picam.configure(config)
-                print("  ✅ Raspberry Pi Camera detectada (1280x720)")
+                print("  ✅ Raspberry Pi Camera detectada (/dev/video0)")
             except Exception as e:
                 print(f"  ⚠️  Pi Camera falhou: {e}")
                 self.picam = None
-        
-        # USB Webcam
-        if OPENCV_OK:
-            try:
-                self.webcam = cv2.VideoCapture(0)
-                if self.webcam.isOpened():
-                    self.webcam.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-                    self.webcam.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-                    self.webcam.set(cv2.CAP_PROP_FPS, 30)
-                    print("  ✅ USB Webcam detectada (1280x720)")
-                else:
-                    self.webcam = None
-                    print("  ⚠️  Nenhuma USB Webcam detectada")
-            except Exception as e:
-                print(f"  ⚠️  Webcam falhou: {e}")
-                self.webcam = None
     
     def read_sensors(self) -> Dict[str, Any]:
         """
