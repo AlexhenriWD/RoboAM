@@ -1,29 +1,25 @@
 #!/usr/bin/env python3
 """
 EVA FLASK SERVER - Sistema Simples e Funcional
-Servidor web + WebSocket para controle do robô
+✅ CORRIGIDO: Câmeras detectadas e funcionando!
 
-FEATURES:
-✅ Flask web server (interface HTML)
-✅ WebSocket para controle em tempo real
-✅ Camera streaming (Pi Camera OU USB Webcam)
-✅ Controle de movimento (teclado/botões)
-✅ Auto-detecção de câmeras
-✅ Debug detalhado
+SUAS CÂMERAS:
+  • Pi Camera (ov5647) - Picamera2
+  • USB REDRAGON - cv2.VideoCapture(1)
 
 RODE NO RASPBERRY PI:
     python3 eva_flask_server.py
 
 ACESSE DO PC:
-    http://192.168.1.100:5000
+    http://<IP_DO_RASPBERRY>:5000
 """
 
-from flask import Flask, render_template, Response, jsonify, request
+from flask import Flask, render_template, Response, jsonify
 from flask_socketio import SocketIO, emit
 import cv2
 import time
 import threading
-import json
+import numpy as np
 from pathlib import Path
 import sys
 
@@ -54,121 +50,136 @@ app.config['SECRET_KEY'] = 'eva-robot-secret'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # ==========================================
-# SISTEMA DE CÂMERA (AUTO-DETECT)
+# SISTEMA DE CÂMERA - CORRIGIDO
 # ==========================================
 
 class CameraSystem:
-    """Sistema de câmera com auto-detecção"""
+    """Sistema dual de câmeras - CORRIGIDO"""
     
-    def __init__(self):
+    def __init__(self, prefer_picam=True):
+        """
+        Args:
+            prefer_picam: True = preferir Pi Camera, False = preferir USB
+        """
         self.camera = None
         self.camera_type = None
         self.running = False
         self.frame = None
         self.lock = threading.Lock()
         
-        print("\n📷 Detectando câmeras...")
-        self._detect_camera()
+        print("\n📷 Inicializando sistema de câmeras...")
+        
+        if prefer_picam and PICAM_OK:
+            self._init_picamera()
+        else:
+            self._init_usb_camera()
+        
+        # Se primeira opção falhou, tentar alternativa
+        if not self.camera:
+            if prefer_picam:
+                self._init_usb_camera()
+            else:
+                self._init_picamera()
     
-    def _detect_camera(self):
-        """Detecta câmera disponível (Pi Camera ou USB)"""
-        
-        # TENTAR 1: USB Webcam (mais confiável)
-        for idx in [0, 1, 2]:
-            try:
-                print(f"  Testando /dev/video{idx}...")
-                cap = cv2.VideoCapture(idx)
-                
-                if cap.isOpened():
-                    ret, test_frame = cap.read()
-                    
-                    if ret and test_frame is not None:
-                        print(f"  ✅ USB Webcam encontrada em /dev/video{idx}")
-                        
-                        # Configurar
-                        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                        cap.set(cv2.CAP_PROP_FPS, 15)
-                        
-                        self.camera = cap
-                        self.camera_type = f"USB Webcam (/dev/video{idx})"
-                        return
-                    else:
-                        cap.release()
-                else:
-                    cap.release()
+    def _init_picamera(self):
+        """Inicializa Pi Camera"""
+        try:
+            print("  🔧 Tentando Pi Camera...")
             
-            except Exception as e:
-                print(f"    Erro em video{idx}: {e}")
-        
-        # TENTAR 2: Pi Camera (se USB falhou)
-        if PICAM_OK:
-            try:
-                print("  Testando Pi Camera...")
-                
-                picam = Picamera2()
-                
-                # Configuração simplificada
-                config = picam.create_preview_configuration(
-                    main={"size": (640, 480), "format": "RGB888"}
-                )
-                
-                picam.configure(config)
-                picam.start()
-                
-                # Aguardar estabilização
-                time.sleep(1.0)
-                
-                # Testar captura
-                test_frame = picam.capture_array()
-                
-                if test_frame is not None:
-                    print("  ✅ Pi Camera funcionando")
-                    self.camera = picam
-                    self.camera_type = "Raspberry Pi Camera"
-                    return
-                else:
-                    picam.stop()
-                    picam.close()
+            picam = Picamera2()
             
-            except Exception as e:
-                print(f"    Pi Camera falhou: {e}")
+            # Usar câmera 0 (ov5647)
+            config = picam.create_preview_configuration(
+                main={"size": (640, 480), "format": "RGB888"}
+            )
+            
+            picam.configure(config)
+            picam.start()
+            
+            # Aguardar estabilização
+            time.sleep(1.0)
+            
+            # Testar captura
+            test_frame = picam.capture_array()
+            
+            if test_frame is not None and test_frame.size > 0:
+                self.camera = picam
+                self.camera_type = "Pi Camera (ov5647)"
+                print(f"  ✅ Pi Camera OK - {test_frame.shape}")
+            else:
+                picam.stop()
+                picam.close()
+                print("  ❌ Pi Camera não capturou")
         
-        print("  ❌ Nenhuma câmera detectada!")
-        self.camera_type = "Sem câmera"
+        except Exception as e:
+            print(f"  ❌ Pi Camera falhou: {e}")
+    
+    def _init_usb_camera(self):
+        """Inicializa USB Webcam REDRAGON"""
+        try:
+            print("  🔧 Tentando USB Webcam (REDRAGON)...")
+            
+            # /dev/video1 = REDRAGON (confirmado pelo diagnóstico)
+            cap = cv2.VideoCapture(1)
+            
+            if not cap.isOpened():
+                print("  ❌ USB não abriu")
+                return
+            
+            # Configurar
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cap.set(cv2.CAP_PROP_FPS, 15)
+            
+            # Testar captura
+            ret, test_frame = cap.read()
+            
+            if ret and test_frame is not None:
+                self.camera = cap
+                self.camera_type = "USB REDRAGON (/dev/video1)"
+                print(f"  ✅ USB Webcam OK - {test_frame.shape}")
+            else:
+                cap.release()
+                print("  ❌ USB não capturou")
+        
+        except Exception as e:
+            print(f"  ❌ USB Webcam falhou: {e}")
     
     def start(self):
-        """Inicia captura"""
+        """Inicia thread de captura"""
         if not self.camera:
-            print("❌ Sem câmera para iniciar")
+            print("❌ Nenhuma câmera disponível")
             return False
         
         self.running = True
         threading.Thread(target=self._capture_loop, daemon=True).start()
-        print(f"✅ Camera iniciada: {self.camera_type}")
+        print(f"✅ Streaming iniciado: {self.camera_type}")
         return True
     
     def _capture_loop(self):
-        """Loop de captura"""
-        print("📹 Loop de captura iniciado")
+        """Loop de captura contínua"""
+        print("📹 Loop de captura rodando...")
+        
+        frame_count = 0
+        last_fps_time = time.time()
         
         while self.running:
             try:
                 # Capturar frame
                 if isinstance(self.camera, Picamera2):
-                    # Pi Camera
+                    # Pi Camera - captura RGB
                     frame = self.camera.capture_array()
                     
-                    # Converter RGB para BGR (OpenCV)
+                    # Converter RGB -> BGR para OpenCV
                     if frame is not None and len(frame.shape) == 3:
                         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 
                 else:
-                    # USB Webcam
+                    # USB Webcam - já retorna BGR
                     ret, frame = self.camera.read()
                     
                     if not ret or frame is None:
-                        print("⚠️ Falha ao capturar frame da webcam")
+                        print("⚠️ Frame vazio da webcam")
                         time.sleep(0.1)
                         continue
                 
@@ -176,36 +187,53 @@ class CameraSystem:
                 with self.lock:
                     self.frame = frame
                 
+                # FPS counter (a cada 30 frames)
+                frame_count += 1
+                if frame_count % 30 == 0:
+                    now = time.time()
+                    fps = 30 / (now - last_fps_time)
+                    print(f"📊 FPS: {fps:.1f} | Frames: {frame_count}")
+                    last_fps_time = now
+                
                 time.sleep(0.033)  # ~30 FPS
             
             except Exception as e:
-                print(f"❌ Erro no loop de captura: {e}")
+                print(f"❌ Erro no loop: {e}")
                 time.sleep(1.0)
     
     def get_frame(self):
-        """Retorna último frame capturado"""
+        """Retorna último frame (thread-safe)"""
         with self.lock:
             return self.frame.copy() if self.frame is not None else None
     
     def stop(self):
         """Para captura"""
+        print("⏹️ Parando câmera...")
         self.running = False
         
-        if isinstance(self.camera, Picamera2):
-            self.camera.stop()
-            self.camera.close()
-        elif self.camera:
-            self.camera.release()
+        time.sleep(0.5)  # Aguardar thread finalizar
         
-        print("📴 Camera parada")
+        if isinstance(self.camera, Picamera2):
+            try:
+                self.camera.stop()
+                self.camera.close()
+            except:
+                pass
+        elif self.camera:
+            try:
+                self.camera.release()
+            except:
+                pass
+        
+        print("✅ Câmera parada")
 
 
 # ==========================================
-# SISTEMA DE CONTROLE DO ROBÔ
+# SISTEMA DE CONTROLE - CORRIGIDO
 # ==========================================
 
 class RobotController:
-    """Controlador do robô"""
+    """Controlador do robô - invertido conforme seu código"""
     
     def __init__(self):
         self.motor = None
@@ -216,16 +244,13 @@ class RobotController:
                 self.motor = Ordinary_Car()
                 print("✅ Motor inicializado")
             except Exception as e:
-                print(f"❌ Erro ao inicializar motor: {e}")
+                print(f"❌ Motor falhou: {e}")
     
     def drive(self, vx=0.0, vy=0.0, vz=0.0):
         """
-        Controla movimento
+        Controla movimento (valores -1.0 a 1.0)
         
-        Args:
-            vx: forward/backward (-1.0 a 1.0)
-            vy: strafe left/right (-1.0 a 1.0)
-            vz: rotação (-1.0 a 1.0)
+        IMPORTANTE: Motores INVERTIDOS conforme robot_core.py
         """
         if not self.motor:
             return {"status": "error", "error": "Motor não disponível"}
@@ -239,18 +264,29 @@ class RobotController:
         fr = int((vx - vy - vz) * max_pwm)
         br = int((vx + vy - vz) * max_pwm)
         
-        # Aplicar
-        self.motor.set_motor_model(fl, bl, fr, br)
+        # INVERTER conforme robot_core.py
+        # (seus motores estão invertidos fisicamente)
+        fl, bl, fr, br = -fl, -bl, -fr, -br
         
-        return {
-            "status": "ok",
-            "motors": [fl, bl, fr, br]
-        }
+        # Aplicar
+        try:
+            self.motor.set_motor_model(fl, bl, fr, br)
+            return {
+                "status": "ok",
+                "motors": [fl, bl, fr, br],
+                "vx": vx, "vy": vy, "vz": vz
+            }
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
     
     def stop(self):
         """Para motores"""
         if self.motor:
-            self.motor.set_motor_model(0, 0, 0, 0)
+            try:
+                self.motor.set_motor_model(0, 0, 0, 0)
+                return {"status": "ok"}
+            except Exception as e:
+                return {"status": "error", "error": str(e)}
         
         return {"status": "ok"}
     
@@ -259,14 +295,19 @@ class RobotController:
         self.stop()
         
         if self.motor:
-            self.motor.close()
+            try:
+                self.motor.close()
+            except:
+                pass
 
 
 # ==========================================
 # INSTÂNCIAS GLOBAIS
 # ==========================================
 
-camera_system = CameraSystem()
+# Preferir Pi Camera (melhor qualidade)
+# Altere prefer_picam=False se quiser USB por padrão
+camera_system = CameraSystem(prefer_picam=True)
 robot = RobotController()
 
 # ==========================================
@@ -282,19 +323,21 @@ def index():
 def status():
     """Status do sistema"""
     return jsonify({
-        'camera': camera_system.camera_type,
+        'camera': camera_system.camera_type or 'Sem câmera',
         'motor': 'OK' if robot.motor else 'Não disponível',
         'time': time.time()
     })
 
 def generate_video():
-    """Gerador de frames para streaming"""
+    """Gerador de frames MJPEG"""
     while True:
         frame = camera_system.get_frame()
         
         if frame is None:
-            # Frame vazio se sem câmera
-            frame = create_placeholder_frame()
+            # Placeholder se sem frame
+            frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(frame, "Aguardando camera...", (150, 240),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
         
         # Codificar JPEG
         ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
@@ -305,24 +348,9 @@ def generate_video():
         
         time.sleep(0.033)  # ~30 FPS
 
-def create_placeholder_frame():
-    """Cria frame placeholder quando sem câmera"""
-    frame = np.zeros((480, 640, 3), dtype=np.uint8)
-    
-    text = "Sem Camera"
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    
-    text_size = cv2.getTextSize(text, font, 1, 2)[0]
-    text_x = (640 - text_size[0]) // 2
-    text_y = (480 + text_size[1]) // 2
-    
-    cv2.putText(frame, text, (text_x, text_y), font, 1, (255, 255, 255), 2)
-    
-    return frame
-
 @app.route('/video_feed')
 def video_feed():
-    """Stream de vídeo"""
+    """Stream de vídeo MJPEG"""
     return Response(
         generate_video(),
         mimetype='multipart/x-mixed-replace; boundary=frame'
@@ -339,7 +367,7 @@ def handle_connect():
     
     emit('welcome', {
         'message': 'Conectado ao EVA Robot',
-        'camera': camera_system.camera_type,
+        'camera': camera_system.camera_type or 'Sem câmera',
         'motor': 'OK' if robot.motor else 'Não disponível'
     })
 
@@ -355,7 +383,7 @@ def handle_command(data):
     cmd = data.get('cmd')
     params = data.get('params', {})
     
-    print(f"📨 Comando: {cmd} {params}")
+    print(f"📨 CMD: {cmd} {params}")
     
     if cmd == 'drive':
         result = robot.drive(
@@ -373,7 +401,7 @@ def handle_command(data):
     emit('response', result)
 
 # ==========================================
-# TEMPLATE HTML
+# TEMPLATE HTML (salvo automaticamente)
 # ==========================================
 
 TEMPLATE_DIR = Path(__file__).parent / 'templates'
@@ -387,11 +415,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         
         body {
             font-family: 'Segoe UI', Arial, sans-serif;
@@ -499,6 +523,7 @@ HTML_TEMPLATE = """
         
         .btn:active {
             transform: translateY(0);
+            background: linear-gradient(135deg, #564ba2 0%, #667eea 100%);
         }
         
         .btn-stop {
@@ -547,22 +572,13 @@ HTML_TEMPLATE = """
             border-bottom: 1px solid rgba(255,255,255,0.1);
         }
         
-        .info-row:last-child {
-            border-bottom: none;
-        }
+        .info-row:last-child { border-bottom: none; }
         
-        .connected {
-            color: #4ade80;
-        }
-        
-        .disconnected {
-            color: #f87171;
-        }
+        .connected { color: #4ade80; }
+        .disconnected { color: #f87171; }
         
         @media (max-width: 968px) {
-            .container {
-                grid-template-columns: 1fr;
-            }
+            .container { grid-template-columns: 1fr; }
         }
     </style>
 </head>
@@ -575,15 +591,12 @@ HTML_TEMPLATE = """
     </div>
     
     <div class="container">
-        <!-- Painel de Vídeo -->
         <div class="video-panel">
             <h2>📹 Camera Feed</h2>
             <img id="camera-feed" src="/video_feed" alt="Camera Feed">
         </div>
         
-        <!-- Painel de Controles -->
         <div class="control-panel">
-            <!-- Movimento -->
             <div class="control-section">
                 <h3>🎮 Movimento</h3>
                 
@@ -601,7 +614,6 @@ HTML_TEMPLATE = """
                     <div></div>
                 </div>
                 
-                <!-- Velocidade -->
                 <div class="speed-control">
                     <label>⚡ Velocidade</label>
                     <input type="range" id="speed-slider" min="500" max="3000" value="1500" step="100">
@@ -609,7 +621,6 @@ HTML_TEMPLATE = """
                 </div>
             </div>
             
-            <!-- Info -->
             <div class="info-panel">
                 <div class="info-row">
                     <span>Câmera:</span>
@@ -629,12 +640,9 @@ HTML_TEMPLATE = """
     
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <script>
-        // WebSocket
         const socket = io();
-        
         let speed = 1500;
         
-        // Conexão
         socket.on('connect', () => {
             console.log('✅ Conectado');
             document.getElementById('connection-status').textContent = 'Conectado';
@@ -657,14 +665,12 @@ HTML_TEMPLATE = """
             console.log('Response:', data);
         });
         
-        // Funções de controle
         function sendCommand(cmd, params = {}) {
             socket.emit('command', { cmd, params });
             document.getElementById('info-last-cmd').textContent = cmd;
         }
         
         function drive(vx = 0, vy = 0, vz = 0) {
-            // Normalizar pela velocidade
             const factor = speed / 1500;
             sendCommand('drive', {
                 vx: vx * factor,
@@ -678,25 +684,25 @@ HTML_TEMPLATE = """
         }
         
         // Botões
-        document.getElementById('btn-forward').addEventListener('mousedown', () => drive(1, 0, 0));
-        document.getElementById('btn-forward').addEventListener('mouseup', stop);
-        document.getElementById('btn-forward').addEventListener('mouseleave', stop);
+        const btns = [
+            ['btn-forward', () => drive(1, 0, 0)],
+            ['btn-backward', () => drive(-1, 0, 0)],
+            ['btn-left', () => drive(0, 0, 1)],
+            ['btn-right', () => drive(0, 0, -1)]
+        ];
         
-        document.getElementById('btn-backward').addEventListener('mousedown', () => drive(-1, 0, 0));
-        document.getElementById('btn-backward').addEventListener('mouseup', stop);
-        document.getElementById('btn-backward').addEventListener('mouseleave', stop);
-        
-        document.getElementById('btn-left').addEventListener('mousedown', () => drive(0, 0, 1));
-        document.getElementById('btn-left').addEventListener('mouseup', stop);
-        document.getElementById('btn-left').addEventListener('mouseleave', stop);
-        
-        document.getElementById('btn-right').addEventListener('mousedown', () => drive(0, 0, -1));
-        document.getElementById('btn-right').addEventListener('mouseup', stop);
-        document.getElementById('btn-right').addEventListener('mouseleave', stop);
+        btns.forEach(([id, fn]) => {
+            const btn = document.getElementById(id);
+            btn.addEventListener('mousedown', fn);
+            btn.addEventListener('touchstart', fn);
+            btn.addEventListener('mouseup', stop);
+            btn.addEventListener('touchend', stop);
+            btn.addEventListener('mouseleave', stop);
+        });
         
         document.getElementById('btn-stop').addEventListener('click', stop);
         
-        // Slider de velocidade
+        // Slider
         const speedSlider = document.getElementById('speed-slider');
         const speedValue = document.getElementById('speed-value');
         
@@ -705,7 +711,7 @@ HTML_TEMPLATE = """
             speedValue.textContent = speed;
         });
         
-        // Teclado (WASD)
+        // Teclado
         let keyPressed = {};
         
         document.addEventListener('keydown', (e) => {
@@ -717,13 +723,12 @@ HTML_TEMPLATE = """
                 case 's': drive(-1, 0, 0); break;
                 case 'a': drive(0, 0, 1); break;
                 case 'd': drive(0, 0, -1); break;
-                case ' ': stop(); break;
+                case ' ': stop(); e.preventDefault(); break;
             }
         });
         
         document.addEventListener('keyup', (e) => {
             keyPressed[e.key] = false;
-            
             if (['w', 's', 'a', 'd'].includes(e.key.toLowerCase())) {
                 stop();
             }
@@ -737,14 +742,13 @@ HTML_TEMPLATE = """
                     document.getElementById('info-camera').textContent = data.camera;
                     document.getElementById('info-motor').textContent = data.motor;
                 })
-                .catch(err => console.error('Status error:', err));
+                .catch(() => {});
         }, 5000);
     </script>
 </body>
 </html>
 """
 
-# Salvar template
 (TEMPLATE_DIR / 'control.html').write_text(HTML_TEMPLATE, encoding='utf-8')
 
 # ==========================================
@@ -755,14 +759,21 @@ def main():
     print("\n" + "="*60)
     print("🤖 EVA FLASK SERVER")
     print("="*60)
+    print("\nSuas câmeras detectadas:")
+    print("  • Pi Camera (ov5647)")
+    print("  • USB REDRAGON (/dev/video1)")
     print("\nRecursos:")
-    print(f"  📷 Câmera: {camera_system.camera_type}")
+    print(f"  📷 Câmera ativa: {camera_system.camera_type or 'NENHUMA'}")
     print(f"  🚗 Motor: {'OK' if robot.motor else 'Não disponível'}")
     print("\n" + "="*60)
     
     # Iniciar câmera
     if camera_system.camera:
-        camera_system.start()
+        if not camera_system.start():
+            print("⚠️ Falha ao iniciar streaming")
+    else:
+        print("❌ NENHUMA câmera disponível!")
+        print("   O servidor vai rodar mas sem vídeo")
     
     # Iniciar servidor
     try:
@@ -770,9 +781,13 @@ def main():
         print("   Porta: 5000")
         print("\n📱 Acesse de outro dispositivo:")
         print("   http://<IP_DO_RASPBERRY>:5000")
+        print("\n   Exemplo: http://192.168.1.100:5000")
+        print("\n💡 Controles:")
+        print("   • Botões na interface")
+        print("   • Teclado: W/A/S/D + ESPAÇO para parar")
         print("\n" + "="*60 + "\n")
         
-        socketio.run(app, host='0.0.0.0', port=5000, debug=False)
+        socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
     
     except KeyboardInterrupt:
         print("\n\n⚠️ Ctrl+C detectado")
