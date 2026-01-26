@@ -80,24 +80,42 @@ class EVANetworkServer:
             pass
         finally:
             self.clients.discard(websocket)
-            print(f"📡 Cliente saiu: {client_id}")
+            print("🛑 Cliente saiu, parando robô")
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self.robot.stop)
 
     async def _process_message(self, websocket, raw):
         msg = json.loads(raw)
         cmd = msg.get("cmd")
         p = msg.get("params", {})
 
+        loop = asyncio.get_running_loop()
         if cmd == "drive":
-            self.robot.drive(p.get("vx",0), p.get("vy",0), p.get("vz",0))
+            await loop.run_in_executor(
+                None,
+                self.robot.drive,
+                p.get("vx",0),
+                p.get("vy",0),
+                p.get("vz",0)
+            )
         elif cmd == "servo":
-            self.robot.move_servo(p["channel"], p["angle"], p.get("smooth",True), p.get("enable_camera",True))
-        elif cmd == "camera":
-            if p["action"] == "force":
-                self.robot.force_camera(p["camera"])
-            elif p["action"] == "disable_arm":
-                self.robot.disable_arm_camera()
+            await loop.run_in_executor(
+                None,
+                self.robot.move_servo,
+                p["channel"],
+                p["angle"],
+                p.get("smooth",True),
+                p.get("enable_camera",True)
+            )
+
         elif cmd == "stop":
-            self.robot.stop()
+            await loop.run_in_executor(None, self.robot.stop)
+
+        elif cmd == "camera":
+            if p["action"]=="force":
+                await loop.run_in_executor(None, self.robot.force_camera, p["camera"])
+            elif p["action"]=="disable_arm":
+                await loop.run_in_executor(None, self.robot.disable_arm_camera)
 
     async def _broadcast_state_loop(self):
         while self.running:
@@ -129,6 +147,7 @@ class EVANetworkServer:
 async def main():
     server = EVANetworkServer()
     await server.start()
+    
 
 if __name__ == "__main__":
     asyncio.run(main())
