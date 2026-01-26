@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Dict, Optional, Set, Any, Tuple
 
 import websockets
+from eva_camera_system import SmartCameraSystem, CameraConfig
 
 from robot_protocol import parse_command, now_s, clamp, as_float, as_int
 
@@ -96,6 +97,12 @@ class RobotWebSocketServer:
         self._state_task: Optional[asyncio.Task] = None
         self._watchdog_task: Optional[asyncio.Task] = None
 
+        # Sistema de câmeras inteligente
+        self.camera_system = SmartCameraSystem(CameraConfig())
+        self.camera_system.start()
+        self.camera_system.streaming = True
+        asyncio.create_task(self.camera_system.stream_loop())
+
         self.stats = {
             "total_connections": 0,
             "total_commands": 0,
@@ -137,13 +144,15 @@ class RobotWebSocketServer:
         try:
             welcome = {
                 "type": "welcome",
+                
                 "message": "Conectado ao EVA Robot (Raspberry)",
                 "client_id": client_id,
                 "server_time": datetime.now().isoformat(),
                 "state": self._get_state_payload()
             }
             await websocket.send(json.dumps(welcome))
-
+            # Registrar cliente para stream de câmera
+            self.camera_system.add_client(websocket)
             async for raw in websocket:
                 try:
                     await self._process_message(websocket, raw)
@@ -286,6 +295,13 @@ class RobotWebSocketServer:
             pitch_i = as_int(pitch, 0) if pitch is not None else None
 
             result = self.actuator.move_head(yaw=yaw_i, pitch=pitch_i, smooth=smooth)
+
+            # Atualizar sistema de câmera conforme movimento da cabeça
+            if yaw is not None or pitch is not None:
+                self.camera_system.update_head_position({
+                    "yaw": yaw if yaw is not None else self.actuator.state.head_position.get("yaw", 90),
+                    "pitch": pitch if pitch is not None else self.actuator.state.head_position.get("pitch", 90)
+                })
 
             await websocket.send(json.dumps({
                 "type": "response",
