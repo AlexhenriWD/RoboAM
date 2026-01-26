@@ -1,10 +1,7 @@
-from ultrasonic import Ultrasonic
-from motor import Ordinary_Car
-from servo import Servo
-from infrared import Infrared
-from adc import ADC
+
 import time
 import math
+from robot_core import Servo, Ordinary_Car, Ultrasonic, ADC, Camera
 
 class Car:
     def __init__(self):
@@ -26,8 +23,6 @@ class Car:
             self.sonic = Ultrasonic()
         if self.motor is None:
             self.motor = Ordinary_Car()
-        if self.infrared is None:
-            self.infrared = Infrared()
         if self.adc is None:
             self.adc = ADC() 
 
