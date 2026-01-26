@@ -26,6 +26,7 @@ class EVANetworkServer:
         self._state_task = None
         self._camera_task = None
         self._http_server = None
+        self.lock = asyncio.Lock()
 
     async def start(self):
         print("🚀 Iniciando servidor...")
@@ -89,7 +90,7 @@ class EVANetworkServer:
         cmd = msg.get("cmd")
         p = msg.get("params", {})
 
-        async with self.hardware_lock: # <--- Garante exclusividade
+        async with self.lock: # <--- Garante exclusividade
             loop = asyncio.get_running_loop()
             if cmd == "drive":
                 await loop.run_in_executor(None, self.robot.drive, p.get("vx",0), p.get("vy",0), p.get("vz",0))
@@ -137,7 +138,7 @@ class EVANetworkServer:
                             })
                             for ws in list(self.clients):
                                 await ws.send(payload)
-                await asyncio.sleep(0.07)
+                await asyncio.sleep(0.1)
 
 
 async def main():
