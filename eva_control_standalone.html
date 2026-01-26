@@ -1,4 +1,6 @@
 <script>
+document.addEventListener("DOMContentLoaded", () => {
+
 const WS_PORT = 8765;
 let ws = null;
 let connected = false;
@@ -12,7 +14,9 @@ const cameraFeed = document.getElementById('camera-feed');
 const cameraBadge = document.getElementById('camera-badge');
 const cameraName = document.getElementById('camera-name');
 
-if (robotIP) robotIPInput.value = robotIP;
+if (robotIP && robotIPInput) {
+    robotIPInput.value = robotIP;
+}
 
 btnConnect.onclick = () => {
     const ip = robotIPInput.value.trim();
@@ -67,5 +71,7 @@ document.getElementById("btn-disable-arm").onclick=()=>send("camera",{action:"di
     slider.oninput=e=>{
         send("servo",{channel:i,angle:parseInt(e.target.value)});
     };
+});
+
 });
 </script>
