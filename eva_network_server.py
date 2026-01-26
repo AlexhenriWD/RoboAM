@@ -11,26 +11,12 @@ class EVANetworkServer:
         self.clients = set()
         self.lock = asyncio.Lock() # 🔒 Garante que um comando não atropele o outro
 
-    async def start(self):
-        if not self.robot.initialize():
-            print("❌ Falha no hardware")
-            return
-
-        # Inicia a câmera em segundo plano
-        asyncio.create_task(self._camera_loop())
-        
-        async with serve(self._handler, "0.0.0.0", 8765):
-            print("🚀 Servidor Rodando em ws://IP_DO_RASPBERRY:8765")
-            await asyncio.Future()
-
-    # Adicione este método dentro da classe EVANetworkServer
     async def _process_request(self, path, request_headers):
         """Corrige o erro de 'keep-alive' forçando o header correto"""
         if "Connection" in request_headers and request_headers["Connection"] == "keep-alive":
             request_headers["Connection"] = "Upgrade"
         return None
 
-    # No método start, modifique a linha do 'serve':
     async def start(self):
         print("🚀 Iniciando servidor...")
         if not self.robot.initialize():
@@ -49,6 +35,7 @@ class EVANetworkServer:
             print(f"🌐 Conecte o controle no IP do Raspberry na porta {self.ws_port}")
             await asyncio.Future()
 
+    
     async def _handler(self, websocket):
         self.clients.add(websocket)
         try:
