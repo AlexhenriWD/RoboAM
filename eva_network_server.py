@@ -89,33 +89,28 @@ class EVANetworkServer:
         cmd = msg.get("cmd")
         p = msg.get("params", {})
 
-        loop = asyncio.get_running_loop()
-        if cmd == "drive":
-            await loop.run_in_executor(
-                None,
-                self.robot.drive,
-                p.get("vx",0),
-                p.get("vy",0),
-                p.get("vz",0)
-            )
-        elif cmd == "servo":
-            await loop.run_in_executor(
-                None,
-                self.robot.move_servo,
-                p["channel"],
-                p["angle"],
-                p.get("smooth",True),
-                p.get("enable_camera",True)
-            )
+        async with self.hardware_lock: # <--- Garante exclusividade
+            loop = asyncio.get_running_loop()
+            if cmd == "drive":
+                await loop.run_in_executor(None, self.robot.drive, p.get("vx",0), p.get("vy",0), p.get("vz",0))
+            elif cmd == "servo":
+                await loop.run_in_executor(
+                    None,
+                    self.robot.move_servo,
+                    p["channel"],
+                    p["angle"],
+                    p.get("smooth",True),
+                    p.get("enable_camera",True)
+                )
 
-        elif cmd == "stop":
-            await loop.run_in_executor(None, self.robot.stop)
+            elif cmd == "stop":
+                await loop.run_in_executor(None, self.robot.stop)
 
-        elif cmd == "camera":
-            if p["action"]=="force":
-                await loop.run_in_executor(None, self.robot.force_camera, p["camera"])
-            elif p["action"]=="disable_arm":
-                await loop.run_in_executor(None, self.robot.disable_arm_camera)
+            elif cmd == "camera":
+                if p["action"]=="force":
+                    await loop.run_in_executor(None, self.robot.force_camera, p["camera"])
+                elif p["action"]=="disable_arm":
+                    await loop.run_in_executor(None, self.robot.disable_arm_camera)
 
     async def _broadcast_state_loop(self):
         while self.running:
@@ -129,19 +124,20 @@ class EVANetworkServer:
     async def _broadcast_camera_loop(self):
         while self.running:
             if self.clients:
-                frame = self.robot.get_camera_frame()
+                async with self.hardware_lock: # <--- Espera o motor liberar
+                    frame = self.robot.get_camera_frame()
                 if frame is not None:
-                    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY,70])
-                    if ok:
-                        b64 = base64.b64encode(buf).decode()
-                        payload = json.dumps({
-                            "type":"camera_frame",
-                            "data":b64,
-                            "camera": self.robot.get_camera_status()["active_camera"]
-                        })
-                        for ws in list(self.clients):
-                            await ws.send(payload)
-            await asyncio.sleep(0.07)
+                        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY,70])
+                        if ok:
+                            b64 = base64.b64encode(buf).decode()
+                            payload = json.dumps({
+                                "type":"camera_frame",
+                                "data":b64,
+                                "camera": self.robot.get_camera_status()["active_camera"]
+                            })
+                            for ws in list(self.clients):
+                                await ws.send(payload)
+                await asyncio.sleep(0.07)
 
 
 async def main():
