@@ -64,8 +64,9 @@ class EVAWebSocketServer:
         Handler customizado para requisições HTTP
         Redireciona para instruções de uso
         """
+        headers = request_headers
         # Se não for uma requisição WebSocket válida
-        if request_headers.get("Upgrade", "").lower() != "websocket":
+        if headers.get("Upgrade", "").lower() != "websocket":
             import http
             html_content = """<!DOCTYPE html>
 <html>
@@ -216,67 +217,29 @@ class EVANetworkServer:
             # Importar http para o handler
             import http
             
-            async def process_request(path, request_headers):
-                """Handler para requisições HTTP no WebSocket"""
-                if request_headers.get("Upgrade", "").lower() != "websocket":
-                    html_content = f"""<!DOCTYPE html>
-<html>
-<head>
-    <title>EVA Robot - WebSocket Server</title>
-    <meta charset="UTF-8">
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            max-width: 800px;
-            margin: 50px auto;
-            padding: 20px;
-            background: #1e3c72;
-            color: white;
-        }}
-        .box {{
-            background: rgba(255,255,255,0.1);
-            padding: 20px;
-            border-radius: 10px;
-            margin: 20px 0;
-        }}
-        code {{
-            background: rgba(0,0,0,0.3);
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-family: monospace;
-        }}
-        h1 {{ color: #4ade80; }}
-        h2 {{ color: #93c5fd; }}
-    </style>
-</head>
-<body>
-    <h1>🤖 EVA Robot - WebSocket Server</h1>
-    
-    <div class="box">
-        <h2>✅ Servidor Ativo</h2>
-        <p>Este é o servidor WebSocket do EVA Robot.</p>
-        <p>Porta: <code>{self.ws_port}</code></p>
-    </div>
-    
-    <div class="box">
-        <h2>📱 Para Conectar</h2>
-        <p>Use a interface web standalone ou conecte via JavaScript:</p>
-        <p><code>ws://{request_headers.get('Host', 'localhost')}:{self.ws_port}</code></p>
-    </div>
-    
-    <div class="box">
-        <h2>💡 Interface Web</h2>
-        <p>Acesse: <code>http://{request_headers.get('Host', 'localhost').split(':')[0]}:{self.http_port}/eva_control_standalone.html</code></p>
-    </div>
-</body>
-</html>"""
+            async def process_request(path, request):
+                headers = request.headers
+
+                if headers.get("Upgrade", "").lower() != "websocket":
+                    import http
+                    html_content = """<!DOCTYPE html>
+            <html>
+            <head>
+                <title>EVA Robot - WebSocket Server</title>
+            </head>
+            <body>
+                <h1>🤖 EVA Robot - WebSocket Server</h1>
+                <p>Servidor ativo.</p>
+            </body>
+            </html>"""
                     return (
                         http.HTTPStatus.OK,
                         [("Content-Type", "text/html; charset=utf-8")],
-                        html_content.encode('utf-8')
+                        html_content.encode("utf-8")
                     )
-                
+
                 return None
+
             
             async with serve(
                 self._handle_client,
