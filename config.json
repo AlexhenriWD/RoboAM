@@ -1,38 +1,113 @@
 {
-  "ai_mode": "autonomous",
-  "decision_interval": 2.0,
-  "max_speed": 50,
-  "safety_distance": 30,
-  "detection_distance": 50,
+  "_comment": "Configuração do EVA Robot System",
   
-  "camera_enabled": true,
-  "arm_enabled": true,
-  
-  "external_ai_url": "http://localhost:1234",
-  
-  "arm_limits": {
-    "base": {"min": 0, "max": 180, "home": 90},
-    "shoulder": {"min": 75, "max": 175, "home": 90},
-    "elbow": {"min": 70, "max": 145, "home": 90},
-    "gripper": {"min": 40, "max": 100, "home": 70}
+  "network": {
+    "host": "0.0.0.0",
+    "port": 8765,
+    "ping_interval": 15,
+    "ping_timeout": 20
   },
   
-  "behaviors": {
-    "object_detected": {
-      "action": "investigate",
-      "arm_response": "point_forward",
-      "camera_activate": true
+  "camera": {
+    "usb": {
+      "enabled": true,
+      "device_index": 1,
+      "width": 640,
+      "height": 480,
+      "fps": 15,
+      "jpeg_quality": 70
     },
-    "object_close": {
-      "action": "grab_attempt",
-      "distance_threshold": 20,
-      "arm_response": "grab"
+    "picam": {
+      "enabled": true,
+      "width": 640,
+      "height": 480,
+      "rotation": 90,
+      "jpeg_quality": 70,
+      "_rotation_options": "0, 90, 180, 270"
     },
-    "idle": {
-      "action": "explore",
-      "arm_response": "rest"
+    "stream_fps": 15,
+    "arm_idle_timeout": 3.0,
+    "_arm_idle_timeout_comment": "Segundos sem usar braço antes de voltar para USB"
+  },
+  
+  "servos": {
+    "enabled": true,
+    "min_delay": 0.02,
+    "smooth_step": 2,
+    "smooth_delay": 0.02,
+    
+    "channels": {
+      "0": {
+        "name": "Base (Yaw)",
+        "min": 0,
+        "max": 180,
+        "home": 90
+      },
+      "1": {
+        "name": "Ombro (Pitch)",
+        "min": 0,
+        "max": 180,
+        "home": 90
+      },
+      "2": {
+        "name": "Cotovelo",
+        "min": 0,
+        "max": 180,
+        "home": 90
+      },
+      "3": {
+        "name": "Cabeça",
+        "min": 0,
+        "max": 180,
+        "home": 90
+      }
     }
   },
   
-  "groq_api_key": ""
+  "motor": {
+    "enabled": true,
+    "default_speed": 1500,
+    "max_speed": 3000,
+    "invert_all": true,
+    "swap_left_right": true,
+    "_comment": "Ajustar conforme calibração física"
+  },
+  
+  "sensors": {
+    "ultrasonic": {
+      "enabled": true,
+      "trigger_pin": 27,
+      "echo_pin": 22,
+      "timeout": 0.04
+    },
+    "adc": {
+      "enabled": true,
+      "battery_channel": 2,
+      "battery_multiplier": 3,
+      "_multiplier_comment": "3 para PCB v1, 2 para PCB v2"
+    },
+    "buzzer": {
+      "enabled": true
+    }
+  },
+  
+  "safety": {
+    "watchdog_timeout": 5.0,
+    "min_battery_v": 6.5,
+    "min_distance_cm": 15,
+    "_watchdog_comment": "Segundos sem comando antes de parar"
+  },
+  
+  "state_broadcast": {
+    "enabled": true,
+    "interval": 0.5,
+    "_interval_comment": "Intervalo em segundos (2 Hz)"
+  },
+  
+  "logging": {
+    "level": "INFO",
+    "file": "eva_robot.log",
+    "max_size_mb": 10,
+    "_levels": "DEBUG, INFO, WARNING, ERROR"
+  }
 }

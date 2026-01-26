@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-EVA FLASK SERVER - Sistema Completo
-✅ Dual camera com rotação da Pi Camera
-✅ Controle completo do braço (5 servos)
-✅ Seletor manual de câmera (USB/Pi/Auto)
+EVA FLASK SERVER - Sistema Dual de Câmeras Inteligente
+✅ CORRIGIDO: Controles de movimento
+✅ NOVO: Troca automática de câmeras
+   - USB REDRAGON → Navegação (movimento do carro)
+   - Pi Camera → Quando braço/cabeça se move
 
 RODE NO RASPBERRY PI:
     python3 eva_flask_server.py
+
+ACESSE DO PC:
+    http://<IP_DO_RASPBERRY>:5000
 """
 
-from flask import Flask, render_template, Response, jsonify, request
+from flask import Flask, render_template, Response, jsonify
 from flask_socketio import SocketIO, emit
 import cv2
 import time
@@ -18,7 +22,7 @@ import numpy as np
 from pathlib import Path
 import sys
 
-# Hardware
+# Hardware do robô
 HARDWARE_PATH = Path(__file__).parent / 'hardware'
 sys.path.insert(0, str(HARDWARE_PATH))
 
@@ -27,21 +31,24 @@ try:
     MOTOR_OK = True
 except:
     MOTOR_OK = False
+    print("⚠️ Motor não disponível")
 
 try:
     from picamera2 import Picamera2
     PICAM_OK = True
 except:
     PICAM_OK = False
+    print("⚠️ PiCamera2 não disponível")
 
 try:
     from arm_calibration import ArmController
     ARM_OK = True
 except:
     ARM_OK = False
+    print("⚠️ Braço não disponível")
 
 # ==========================================
-# FLASK
+# FLASK APP
 # ==========================================
 
 app = Flask(__name__)
@@ -54,62 +61,66 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 class DualCameraSystem:
     """
-    Sistema dual inteligente
+    Sistema inteligente com 2 câmeras:
     
-    Modos:
-    - AUTO: Troca automática (navegação → USB, braço → Pi)
-    - USB: Força USB sempre
-    - PICAM: Força Pi Camera sempre
+    📹 USB REDRAGON → Navegação (movimento do carro)
+    📷 Pi Camera → Manipulação (braço/cabeça ativa)
+    
+    Troca automática:
+    - Movimento do carro → USB
+    - Movimento do braço → Pi Camera
+    - 3s sem movimento do braço → volta pra USB
     """
     
     def __init__(self):
         self.usb_camera = None
         self.pi_camera = None
         
-        # Modos: "auto", "usb", "picam"
-        self.mode = "auto"
-        self.active_camera = "usb"
-        
+        self.active_camera = "usb"  # Padrão: navegação
         self.running = False
         self.frame = None
         self.lock = threading.Lock()
         
         # Auto-switch
         self.last_arm_move_time = 0.0
-        self.arm_idle_timeout = 3.0
+        self.arm_idle_timeout = 3.0  # 3s sem mexer braço → volta USB
         
-        # Rotação da Pi Camera (90° = lateral direita)
-        self.picam_rotation = 90  # 0, 90, 180, 270
-        
-        print("\n📷 Inicializando câmeras...")
+        print("\n📷 Inicializando sistema dual de câmeras...")
         self._init_cameras()
     
     def _init_cameras(self):
-        """Inicializa ambas"""
+        """Inicializa ambas as câmeras"""
         
-        # USB REDRAGON
+        # 1. USB REDRAGON (navegação)
         try:
-            print("  🔧 USB REDRAGON...")
-            cap = cv2.VideoCapture(1)
+            print("  🔧 Inicializando USB REDRAGON...")
+            
+            cap = cv2.VideoCapture(1)  # /dev/video1
             
             if cap.isOpened():
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 cap.set(cv2.CAP_PROP_FPS, 15)
                 
-                ret, test = cap.read()
-                if ret and test is not None:
+                ret, test_frame = cap.read()
+                
+                if ret and test_frame is not None:
                     self.usb_camera = cap
-                    print("  ✅ USB OK")
+                    print("  ✅ USB REDRAGON OK (navegação)")
                 else:
                     cap.release()
-        except Exception as e:
-            print(f"  ❌ USB: {e}")
+                    print("  ❌ USB não captura")
+            else:
+                print("  ❌ USB não abre")
         
-        # Pi Camera
+        except Exception as e:
+            print(f"  ❌ USB falhou: {e}")
+        
+        # 2. Pi Camera (braço/cabeça) - NÃO INICIA ainda
         if PICAM_OK:
             try:
-                print("  🔧 Pi Camera...")
+                print("  🔧 Configurando Pi Camera...")
+                
                 self.pi_camera = Picamera2()
                 
                 config = self.pi_camera.create_preview_configuration(
@@ -117,97 +128,105 @@ class DualCameraSystem:
                 )
                 
                 self.pi_camera.configure(config)
-                print("  ✅ Pi Camera OK")
+                
+                print("  ✅ Pi Camera configurada (ov5647)")
+                # NÃO inicia ainda - só quando necessário
+            
             except Exception as e:
-                print(f"  ❌ Pi Camera: {e}")
+                print(f"  ❌ Pi Camera falhou: {e}")
                 self.pi_camera = None
     
     def start(self):
-        """Inicia sistema"""
+        """Inicia sistema de streaming"""
         if not self.usb_camera and not self.pi_camera:
-            print("❌ Nenhuma câmera")
+            print("❌ Nenhuma câmera disponível")
             return False
         
         self.running = True
         threading.Thread(target=self._capture_loop, daemon=True).start()
         threading.Thread(target=self._auto_switch_loop, daemon=True).start()
         
-        print(f"✅ Sistema iniciado (modo: {self.mode.upper()})")
+        print(f"✅ Sistema dual iniciado (ativa: {self.active_camera.upper()})")
         return True
     
     def _capture_loop(self):
-        """Loop de captura"""
-        pi_cam_active = False
+        """Loop de captura da câmera ativa"""
+        print("📹 Loop de captura rodando...")
+        
+        frame_count = 0
+        last_fps_time = time.time()
+        
+        pi_cam_active = False  # Estado da Pi Camera
         
         while self.running:
             try:
                 frame = None
                 
-                # Decidir câmera (respeitar modo manual)
-                if self.mode == "usb":
-                    target = "usb"
-                elif self.mode == "picam":
-                    target = "picam"
-                else:
-                    target = self.active_camera  # Auto
-                
-                # Pi Camera
-                if target == "picam" and self.pi_camera:
+                # Decidir qual câmera usar
+                if self.active_camera == "picam" and self.pi_camera:
+                    # Pi Camera
+                    
+                    # Iniciar se necessário
                     if not pi_cam_active:
                         try:
                             self.pi_camera.start()
-                            time.sleep(1.0)
+                            time.sleep(1.0)  # Estabilizar
                             pi_cam_active = True
                             print("📷 Pi Camera ATIVADA")
                         except Exception as e:
-                            print(f"❌ Erro Pi Camera: {e}")
-                            target = "usb"
+                            print(f"❌ Erro ao iniciar Pi Camera: {e}")
+                            self.active_camera = "usb"  # Fallback
+                            continue
                     
-                    if pi_cam_active:
-                        try:
-                            frame = self.pi_camera.capture_array()
-                            
-                            if frame is not None and len(frame.shape) == 3:
-                                # RGB → BGR
-                                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                                
-                                # ROTACIONAR (corrigir orientação física)
-                                if self.picam_rotation == 90:
-                                    frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-                                elif self.picam_rotation == 180:
-                                    frame = cv2.rotate(frame, cv2.ROTATE_180)
-                                elif self.picam_rotation == 270:
-                                    frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                        except Exception as e:
-                            print(f"⚠️ Erro captura Pi: {e}")
+                    # Capturar
+                    try:
+                        frame = self.pi_camera.capture_array()
+                        
+                        if frame is not None and len(frame.shape) == 3:
+                            # RGB → BGR
+                            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    except Exception as e:
+                        print(f"⚠️ Erro captura Pi Camera: {e}")
                 
-                # USB Camera
                 else:
+                    # USB Camera
+                    
+                    # Parar Pi Camera se estava ativa
                     if pi_cam_active:
                         try:
                             self.pi_camera.stop()
                             pi_cam_active = False
-                            print("📹 Voltando USB")
+                            print("📹 Voltando para USB REDRAGON")
                         except:
                             pass
                     
+                    # Capturar USB
                     if self.usb_camera and self.usb_camera.isOpened():
                         ret, frame = self.usb_camera.read()
-                        if not ret:
+                        
+                        if not ret or frame is None:
                             frame = None
                 
                 # Salvar frame
                 if frame is not None:
                     with self.lock:
                         self.frame = frame
+                    
+                    # FPS counter
+                    frame_count += 1
+                    if frame_count % 30 == 0:
+                        now = time.time()
+                        fps = 30 / (now - last_fps_time)
+                        print(f"📊 {self.active_camera.upper()}: {fps:.1f} FPS | {frame_count} frames")
+                        last_fps_time = now
                 
-                time.sleep(0.033)
+                time.sleep(0.033)  # ~30 FPS
             
             except Exception as e:
-                print(f"❌ Loop erro: {e}")
+                print(f"❌ Erro no loop: {e}")
                 time.sleep(1.0)
         
-        # Cleanup
+        # Cleanup ao sair
         if pi_cam_active and self.pi_camera:
             try:
                 self.pi_camera.stop()
@@ -215,71 +234,58 @@ class DualCameraSystem:
                 pass
     
     def _auto_switch_loop(self):
-        """Auto-switch (só funciona em modo AUTO)"""
+        """Loop que verifica timeout do braço"""
         while self.running:
             try:
-                if self.mode == "auto":
-                    if self.active_camera == "picam":
-                        idle = time.time() - self.last_arm_move_time
-                        
-                        if idle >= self.arm_idle_timeout:
-                            print(f"⏰ Braço parado {idle:.1f}s → USB")
-                            self.active_camera = "usb"
+                # Se está em modo Pi Camera
+                if self.active_camera == "picam":
+                    # Verificar timeout
+                    idle_time = time.time() - self.last_arm_move_time
+                    
+                    if idle_time >= self.arm_idle_timeout:
+                        # Voltar para USB
+                        print(f"⏰ Braço parado por {idle_time:.1f}s → USB")
+                        self.active_camera = "usb"
                 
                 time.sleep(0.5)
-            except:
+            
+            except Exception as e:
+                print(f"❌ Erro auto-switch: {e}")
                 time.sleep(1.0)
     
-    def set_mode(self, mode):
-        """Define modo: auto/usb/picam"""
-        if mode in ["auto", "usb", "picam"]:
-            self.mode = mode
-            print(f"🎥 Modo: {mode.upper()}")
-            return True
-        return False
-    
     def switch_to_arm_camera(self):
-        """Ativa Pi Camera (se auto)"""
-        if self.mode == "auto":
-            if self.active_camera != "picam":
-                print("🔄 → Pi Camera (braço)")
-                self.active_camera = "picam"
+        """Troca para Pi Camera (braço movendo)"""
+        if self.pi_camera and self.active_camera != "picam":
+            print("🔄 Trocando para Pi Camera (braço ativo)")
+            self.active_camera = "picam"
         
+        # Atualizar timestamp
         self.last_arm_move_time = time.time()
     
     def switch_to_navigation(self):
-        """Ativa USB (se auto)"""
-        if self.mode == "auto":
-            if self.active_camera != "usb":
-                print("🔄 → USB (navegação)")
-                self.active_camera = "usb"
+        """Troca para USB (navegação)"""
+        if self.usb_camera and self.active_camera != "usb":
+            print("🔄 Trocando para USB REDRAGON (navegação)")
+            self.active_camera = "usb"
     
     def get_frame(self):
-        """Retorna frame"""
+        """Retorna último frame"""
         with self.lock:
             return self.frame.copy() if self.frame is not None else None
     
     def get_status(self):
-        """Status"""
-        # Câmera atual (respeitando modo)
-        if self.mode == "usb":
-            current = "USB (forçado)"
-        elif self.mode == "picam":
-            current = "PICAM (forçado)"
-        else:
-            current = self.active_camera.upper() + " (auto)"
-        
+        """Status do sistema"""
         return {
-            "mode": self.mode,
-            "active": current,
+            "active": self.active_camera.upper(),
             "usb_available": self.usb_camera is not None,
             "picam_available": self.pi_camera is not None
         }
     
     def stop(self):
-        """Para tudo"""
-        print("⏹️ Parando câmeras...")
+        """Para sistema"""
+        print("⏹️ Parando sistema de câmeras...")
         self.running = False
+        
         time.sleep(1.0)
         
         if self.pi_camera:
@@ -294,14 +300,16 @@ class DualCameraSystem:
                 self.usb_camera.release()
             except:
                 pass
+        
+        print("✅ Câmeras paradas")
 
 
 # ==========================================
-# CONTROLADOR COMPLETO
+# CONTROLADOR DO ROBÔ
 # ==========================================
 
 class RobotController:
-    """Motor + Braço completo (5 servos)"""
+    """Controlador completo: Motor + Braço"""
     
     def __init__(self, camera_system):
         self.camera_system = camera_system
@@ -309,94 +317,100 @@ class RobotController:
         self.arm = None
         self.speed = 1500
         
-        # Posições atuais do braço
-        self.arm_positions = {
-            0: 90,  # Base
-            1: 90,  # Ombro
-            2: 90,  # Cotovelo
-            3: 90,  # Pulso
-            4: 90   # Garra
-        }
-        
         # Motor
         if MOTOR_OK:
             try:
                 self.motor = Ordinary_Car()
-                print("✅ Motor OK")
+                print("✅ Motor inicializado")
             except Exception as e:
-                print(f"❌ Motor: {e}")
+                print(f"❌ Motor falhou: {e}")
         
         # Braço
         if ARM_OK:
             try:
-                self.arm = ArmController(enable_gripper=True, min_delay=0.15)
-                print("✅ Braço OK (5 servos)")
+                self.arm = ArmController(enable_gripper=False, min_delay=0.15)
+                print("✅ Braço inicializado (modo cabeça)")
             except Exception as e:
-                print(f"❌ Braço: {e}")
+                print(f"❌ Braço falhou: {e}")
     
     def drive(self, vx=0.0, vy=0.0, vz=0.0):
-        """Movimento (CORRIGIDO)"""
+        """
+        Movimento do carro
+        
+        ✅ CORRIGIDO: Esquerda/Direita invertidos
+        """
         if not self.motor:
             return {"status": "error", "error": "Motor não disponível"}
         
+        # Trocar para câmera de navegação
         self.camera_system.switch_to_navigation()
         
+        # Converter para PWM
         max_pwm = self.speed
         
-        # Mecanum
+        # Cinemática mecanum
         fl = int((vx + vy + vz) * max_pwm)
         bl = int((vx - vy + vz) * max_pwm)
         fr = int((vx - vy - vz) * max_pwm)
         br = int((vx + vy - vz) * max_pwm)
         
-        # Inverter tudo
+        # INVERTER TUDO (motores invertidos fisicamente)
         fl, bl, fr, br = -fl, -bl, -fr, -br
         
-        # Trocar esquerda/direita
+        # INVERTER ESQUERDA/DIREITA
+        # Trocar FL↔FR e BL↔BR
         fl, fr = fr, fl
         bl, br = br, bl
         
+        # Aplicar
         try:
             self.motor.set_motor_model(fl, bl, fr, br)
-            return {"status": "ok", "motors": [fl, bl, fr, br]}
+            return {
+                "status": "ok",
+                "motors": [fl, bl, fr, br],
+                "vx": vx, "vy": vy, "vz": vz
+            }
         except Exception as e:
             return {"status": "error", "error": str(e)}
     
-    def move_servo(self, servo_id, angle):
+    def move_head(self, yaw=None, pitch=None):
         """
-        Move servo individual
+        Move cabeça (braço)
         
-        Args:
-            servo_id: 0=Base, 1=Ombro, 2=Cotovelo, 3=Pulso, 4=Garra
-            angle: 0-180
+        Automaticamente troca para Pi Camera
         """
         if not self.arm:
             return {"status": "error", "error": "Braço não disponível"}
         
-        # Ativar Pi Camera
+        # Trocar para câmera do braço
         self.camera_system.switch_to_arm_camera()
         
-        try:
-            # Movimento suave
-            ok = self.arm.move_smooth(servo_id, angle, step=2, step_delay=0.02)
-            
-            if ok:
-                self.arm_positions[servo_id] = angle
-                
-                return {
-                    "status": "ok",
-                    "servo": servo_id,
-                    "angle": angle,
-                    "positions": self.arm_positions.copy()
-                }
-            else:
-                return {"status": "error", "error": "Movimento falhou"}
+        results = []
         
-        except Exception as e:
-            return {"status": "error", "error": str(e)}
+        # Yaw (base - servo 0)
+        if yaw is not None:
+            try:
+                ok = self.arm.move_smooth(0, yaw, step=2, step_delay=0.02)
+                results.append({"servo": "yaw", "angle": yaw, "success": ok})
+            except Exception as e:
+                results.append({"servo": "yaw", "error": str(e)})
+        
+        # Pitch (ombro - servo 1)
+        if pitch is not None:
+            try:
+                ok = self.arm.move_smooth(1, pitch, step=2, step_delay=0.02)
+                results.append({"servo": "pitch", "angle": pitch, "success": ok})
+            except Exception as e:
+                results.append({"servo": "pitch", "error": str(e)})
+        
+        return {
+            "status": "ok",
+            "results": results,
+            "camera": "picam"
+        }
     
     def stop(self):
-        """Para motores"""
+        """Para tudo"""
         if self.motor:
             try:
                 self.motor.set_motor_model(0, 0, 0, 0)
@@ -423,14 +437,14 @@ class RobotController:
 
 
 # ==========================================
-# INSTÂNCIAS
+# INSTÂNCIAS GLOBAIS
 # ==========================================
 
 camera_system = DualCameraSystem()
 robot = RobotController(camera_system)
 
 # ==========================================
-# ROTAS
+# ROTAS FLASK
 # ==========================================
 
 @app.route('/')
@@ -439,26 +453,16 @@ def index():
 
 @app.route('/status')
 def status():
-    cam = camera_system.get_status()
+    cam_status = camera_system.get_status()
     
     return jsonify({
-        'camera_mode': cam['mode'],
-        'camera_active': cam['active'],
-        'camera_usb': cam['usb_available'],
-        'camera_picam': cam['picam_available'],
+        'camera_active': cam_status['active'],
+        'camera_usb': cam_status['usb_available'],
+        'camera_picam': cam_status['picam_available'],
         'motor': 'OK' if robot.motor else 'Não disponível',
         'arm': 'OK' if robot.arm else 'Não disponível',
-        'arm_positions': robot.arm_positions,
         'time': time.time()
     })
-
-@app.route('/camera/mode/<mode>')
-def set_camera_mode(mode):
-    """Troca modo de câmera"""
-    if camera_system.set_mode(mode):
-        return jsonify({"status": "ok", "mode": mode})
-    else:
-        return jsonify({"status": "error", "error": "Modo inválido"})
 
 def generate_video():
     """Gerador MJPEG"""
@@ -467,23 +471,16 @@ def generate_video():
         
         if frame is None:
             frame = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(frame, "Aguardando...", (200, 240),
+            cv2.putText(frame, "Aguardando camera...", (150, 240),
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
         
-        # Badge
-        mode = camera_system.mode.upper()
-        active = "USB" if "USB" in camera_system.get_status()['active'] else "PICAM"
+        # Badge mostrando câmera ativa
+        cam_text = camera_system.active_camera.upper()
+        color = (0, 255, 0) if cam_text == "USB" else (255, 100, 255)
         
-        if mode == "AUTO":
-            text = f"{active} (auto)"
-            color = (0, 255, 0) if active == "USB" else (255, 100, 255)
-        else:
-            text = f"{active} (manual)"
-            color = (255, 200, 0)
-        
-        cv2.rectangle(frame, (10, 10), (200, 50), (0, 0, 0), -1)
-        cv2.putText(frame, text, (20, 40),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        cv2.rectangle(frame, (10, 10), (150, 50), (0, 0, 0), -1)
+        cv2.putText(frame, cam_text, (20, 40),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
         
         ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
         
@@ -495,8 +492,10 @@ def generate_video():
 
 @app.route('/video_feed')
 def video_feed():
-    return Response(generate_video(),
-                   mimetype='multipart/x-mixed-replace; boundary=frame')
+    return Response(
+        generate_video(),
+        mimetype='multipart/x-mixed-replace; boundary=frame'
+    )
 
 # ==========================================
 # WEBSOCKET
@@ -506,20 +505,18 @@ def video_feed():
 def handle_connect():
     print("🔗 Cliente conectado")
     
-    cam = camera_system.get_status()
+    cam_status = camera_system.get_status()
     
     emit('welcome', {
-        'message': 'EVA Robot conectado',
-        'camera_mode': cam['mode'],
-        'camera_active': cam['active'],
-        'motor': 'OK' if robot.motor else 'Não',
-        'arm': 'OK' if robot.arm else 'Não',
-        'arm_positions': robot.arm_positions
+        'message': 'Conectado ao EVA Robot',
+        'camera': cam_status['active'],
+        'motor': 'OK' if robot.motor else 'Não disponível',
+        'arm': 'OK' if robot.arm else 'Não disponível'
     })
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    print("🔌 Desconectado")
+    print("🔌 Cliente desconectado")
     robot.stop()
 
 @socketio.on('command')
@@ -527,7 +524,7 @@ def handle_command(data):
     cmd = data.get('cmd')
     params = data.get('params', {})
     
-    print(f"📨 {cmd} {params}")
+    print(f"📨 CMD: {cmd} {params}")
     
     if cmd == 'drive':
         result = robot.drive(
@@ -536,18 +533,11 @@ def handle_command(data):
             vz=params.get('vz', 0)
         )
     
-    elif cmd == 'servo':
-        result = robot.move_servo(
-            servo_id=params.get('servo'),
-            angle=params.get('angle')
+    elif cmd == 'head':
+        result = robot.move_head(
+            yaw=params.get('yaw'),
+            pitch=params.get('pitch')
         )
-    
-    elif cmd == 'camera_mode':
-        mode = params.get('mode', 'auto')
-        if camera_system.set_mode(mode):
-            result = {"status": "ok", "mode": mode}
-        else:
-            result = {"status": "error", "error": "Modo inválido"}
     
     elif cmd == 'stop':
         result = robot.stop()
@@ -555,20 +545,23 @@ def handle_command(data):
     else:
         result = {"status": "error", "error": f"Comando desconhecido: {cmd}"}
     
+    # Incluir status da câmera
+    result['camera'] = camera_system.active_camera
+    
     emit('response', result)
 
 # ==========================================
-# HTML TEMPLATE
+# TEMPLATE HTML
 # ==========================================
 
 TEMPLATE_DIR = Path(__file__).parent / 'templates'
 TEMPLATE_DIR.mkdir(exist_ok=True)
 
-HTML = """
+HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>EVA Robot - Full Control</title>
+    <title>EVA Robot Control - Dual Camera</title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
@@ -578,71 +571,85 @@ HTML = """
             font-family: 'Segoe UI', Arial, sans-serif;
             background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
             min-height: 100vh;
+            display: flex;
+            flex-direction: column;
             color: white;
-            padding: 20px;
         }
         
         .header {
             background: rgba(0,0,0,0.3);
             padding: 15px;
-            border-radius: 12px;
-            margin-bottom: 20px;
             text-align: center;
+            border-bottom: 2px solid rgba(255,255,255,0.1);
         }
         
-        .header h1 { font-size: 28px; margin-bottom: 10px; }
+        .header h1 {
+            font-size: 28px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
         
-        .status-bar {
-            display: flex;
-            gap: 20px;
-            justify-content: center;
-            flex-wrap: wrap;
+        .status {
             font-size: 14px;
-        }
-        
-        .status-item {
-            background: rgba(0,0,0,0.2);
-            padding: 5px 15px;
-            border-radius: 20px;
+            margin-top: 5px;
+            opacity: 0.8;
         }
         
         .container {
+            flex: 1;
             display: grid;
             grid-template-columns: 2fr 1fr;
             gap: 20px;
-            max-width: 1600px;
+            padding: 20px;
+            max-width: 1400px;
             margin: 0 auto;
+            width: 100%;
         }
         
-        .panel {
+        .video-panel {
             background: rgba(0,0,0,0.4);
             border-radius: 12px;
-            padding: 20px;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
         }
         
-        .panel h2 {
-            font-size: 20px;
+        .video-panel h2 {
             margin-bottom: 15px;
-            border-bottom: 2px solid rgba(255,255,255,0.2);
-            padding-bottom: 10px;
+            font-size: 20px;
         }
         
         #camera-feed {
             width: 100%;
             border-radius: 8px;
             background: #000;
+            aspect-ratio: 4/3;
+            object-fit: contain;
         }
         
-        .controls {
+        .control-panel {
             display: flex;
             flex-direction: column;
             gap: 15px;
+        }
+        
+        .control-section {
+            background: rgba(0,0,0,0.4);
+            border-radius: 12px;
+            padding: 20px;
+        }
+        
+        .control-section h3 {
+            margin-bottom: 15px;
+            font-size: 18px;
+            border-bottom: 2px solid rgba(255,255,255,0.2);
+            padding-bottom: 8px;
         }
         
         .btn-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
             gap: 10px;
+            margin-top: 15px;
         }
         
         .btn {
@@ -656,6 +663,7 @@ HTML = """
             cursor: pointer;
             transition: all 0.2s;
             box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+            user-select: none;
         }
         
         .btn:hover {
@@ -665,13 +673,18 @@ HTML = """
         
         .btn:active {
             transform: translateY(0);
+            background: linear-gradient(135deg, #564ba2 0%, #667eea 100%);
         }
         
         .btn-stop {
             background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
             grid-column: span 3;
-            padding: 20px;
             font-size: 18px;
+            padding: 20px;
+        }
+        
+        .head-sliders {
+            margin-top: 15px;
         }
         
         .slider-group {
@@ -682,7 +695,6 @@ HTML = """
             display: block;
             margin-bottom: 5px;
             font-weight: 600;
-            font-size: 14px;
         }
         
         .slider-group input {
@@ -695,32 +707,49 @@ HTML = """
         .slider-value {
             text-align: center;
             margin-top: 5px;
-            font-size: 20px;
+            font-size: 18px;
             font-weight: 700;
         }
         
-        .camera-selector {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 15px;
+        .speed-control {
+            margin-top: 15px;
         }
         
-        .camera-btn {
-            flex: 1;
-            padding: 10px;
-            background: rgba(255,255,255,0.1);
-            border: 2px solid rgba(255,255,255,0.3);
-            border-radius: 8px;
-            color: white;
-            cursor: pointer;
+        .speed-control label {
+            display: block;
+            margin-bottom: 8px;
             font-weight: 600;
-            transition: all 0.2s;
         }
         
-        .camera-btn.active {
-            background: rgba(100,200,100,0.3);
-            border-color: #4ade80;
+        .speed-control input {
+            width: 100%;
+            height: 8px;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.2);
         }
+        
+        .speed-value {
+            text-align: center;
+            margin-top: 8px;
+            font-size: 24px;
+            font-weight: 700;
+        }
+        
+        .info-panel {
+            background: rgba(0,0,0,0.4);
+            border-radius: 12px;
+            padding: 15px;
+            font-size: 14px;
+        }
+        
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        
+        .info-row:last-child { border-bottom: none; }
         
         .connected { color: #4ade80; }
         .disconnected { color: #f87171; }
@@ -732,102 +761,81 @@ HTML = """
 </head>
 <body>
     <div class="header">
-        <h1>🤖 EVA Robot - Full Control</h1>
-        <div class="status-bar">
-            <div class="status-item">
-                Status: <span id="conn-status" class="disconnected">Offline</span>
-            </div>
-            <div class="status-item">
-                Câmera: <span id="cam-active">-</span>
-            </div>
-            <div class="status-item">
-                Motor: <span id="motor-status">-</span>
-            </div>
-            <div class="status-item">
-                Braço: <span id="arm-status">-</span>
-            </div>
+        <h1>🤖 EVA Robot - Dual Camera System</h1>
+        <div class="status">
+            Status: <span id="connection-status" class="disconnected">Desconectado</span> | 
+            Câmera: <span id="camera-active">-</span>
         </div>
     </div>
     
     <div class="container">
-        <!-- Vídeo -->
-        <div class="panel">
-            <h2>📹 Video Feed</h2>
-            
-            <div class="camera-selector">
-                <button class="camera-btn active" id="cam-auto" onclick="setCameraMode('auto')">
-                    🔄 Auto
-                </button>
-                <button class="camera-btn" id="cam-usb" onclick="setCameraMode('usb')">
-                    📹 USB
-                </button>
-                <button class="camera-btn" id="cam-picam" onclick="setCameraMode('picam')">
-                    📷 Pi Cam
-                </button>
-            </div>
-            
-            <img id="camera-feed" src="/video_feed">
+        <div class="video-panel">
+            <h2>📹 Camera Feed (auto-switch)</h2>
+            <img id="camera-feed" src="/video_feed" alt="Camera Feed">
         </div>
         
-        <!-- Controles -->
-        <div class="controls">
+        <div class="control-panel">
             <!-- Movimento -->
-            <div class="panel">
-                <h2>🚗 Movimento</h2>
+            <div class="control-section">
+                <h3>🚗 Movimento (USB Camera)</h3>
                 
                 <div class="btn-grid">
                     <div></div>
-                    <button class="btn" id="btn-fwd">↑<br>Frente</button>
+                    <button class="btn" id="btn-forward">↑<br>Frente</button>
                     <div></div>
                     
-                    <button class="btn" id="btn-left">←<br>Esq</button>
-                    <button class="btn btn-stop" id="btn-stop">⏹<br>STOP</button>
-                    <button class="btn" id="btn-right">→<br>Dir</button>
+                    <button class="btn" id="btn-left">←<br>Esquerda</button>
+                    <button class="btn btn-stop" id="btn-stop">⏹<br>PARAR</button>
+                    <button class="btn" id="btn-right">→<br>Direita</button>
                     
                     <div></div>
-                    <button class="btn" id="btn-back">↓<br>Ré</button>
+                    <button class="btn" id="btn-backward">↓<br>Ré</button>
                     <div></div>
                 </div>
                 
-                <div class="slider-group" style="margin-top:15px;">
+                <div class="speed-control">
                     <label>⚡ Velocidade</label>
-                    <input type="range" id="speed" min="500" max="3000" value="1500" step="100">
-                    <div class="slider-value"><span id="speed-val">1500</span> PWM</div>
+                    <input type="range" id="speed-slider" min="500" max="3000" value="1500" step="100">
+                    <div class="speed-value"><span id="speed-value">1500</span> PWM</div>
                 </div>
             </div>
             
-            <!-- Braço -->
-            <div class="panel">
-                <h2>🦾 Braço (5 Servos)</h2>
+            <!-- Cabeça -->
+            <div class="control-section">
+                <h3>🦾 Cabeça (Pi Camera)</h3>
                 
-                <div class="slider-group">
-                    <label>0️⃣ Base (Rotação)</label>
-                    <input type="range" class="servo" data-servo="0" min="0" max="180" value="90">
-                    <div class="slider-value"><span id="servo-0">90</span>°</div>
+                <div class="head-sliders">
+                    <div class="slider-group">
+                        <label>Yaw (Base)</label>
+                        <input type="range" id="head-yaw" min="0" max="180" value="90">
+                        <div class="slider-value"><span id="yaw-value">90</span>°</div>
+                    </div>
+                    
+                    <div class="slider-group">
+                        <label>Pitch (Ombro)</label>
+                        <input type="range" id="head-pitch" min="0" max="180" value="90">
+                        <div class="slider-value"><span id="pitch-value">90</span>°</div>
+                    </div>
                 </div>
-                
-                <div class="slider-group">
-                    <label>1️⃣ Ombro</label>
-                    <input type="range" class="servo" data-servo="1" min="0" max="180" value="90">
-                    <div class="slider-value"><span id="servo-1">90</span>°</div>
+            </div>
+            
+            <!-- Info -->
+            <div class="info-panel">
+                <div class="info-row">
+                    <span>Câmera Ativa:</span>
+                    <span id="info-camera">-</span>
                 </div>
-                
-                <div class="slider-group">
-                    <label>2️⃣ Cotovelo</label>
-                    <input type="range" class="servo" data-servo="2" min="0" max="180" value="90">
-                    <div class="slider-value"><span id="servo-2">90</span>°</div>
+                <div class="info-row">
+                    <span>Motor:</span>
+                    <span id="info-motor">-</span>
                 </div>
-                
-                <div class="slider-group">
-                    <label>3️⃣ Pulso</label>
-                    <input type="range" class="servo" data-servo="3" min="0" max="180" value="90">
-                    <div class="slider-value"><span id="servo-3">90</span>°</div>
+                <div class="info-row">
+                    <span>Braço:</span>
+                    <span id="info-arm">-</span>
                 </div>
-                
-                <div class="slider-group">
-                    <label>4️⃣ Garra</label>
-                    <input type="range" class="servo" data-servo="4" min="0" max="180" value="90">
-                    <div class="slider-value"><span id="servo-4">90</span>°</div>
+                <div class="info-row">
+                    <span>Último comando:</span>
+                    <span id="info-last-cmd">-</span>
                 </div>
             </div>
         </div>
@@ -837,121 +845,188 @@ HTML = """
     <script>
         const socket = io();
         let speed = 1500;
-        let cameraMode = 'auto';
         
-        // Conexão
         socket.on('connect', () => {
-            document.getElementById('conn-status').textContent = 'Online';
-            document.getElementById('conn-status').className = 'connected';
+            console.log('✅ Conectado');
+            document.getElementById('connection-status').textContent = 'Conectado';
+            document.getElementById('connection-status').className = 'connected';
         });
         
         socket.on('disconnect', () => {
-            document.getElementById('conn-status').textContent = 'Offline';
-            document.getElementById('conn-status').className = 'disconnected';
+            console.log('❌ Desconectado');
+            document.getElementById('connection-status').textContent = 'Desconectado';
+            document.getElementById('connection-status').className = 'disconnected';
         });
         
         socket.on('welcome', (data) => {
-            document.getElementById('cam-active').textContent = data.camera_active;
-            document.getElementById('motor-status').textContent = data.motor;
-            document.getElementById('arm-status').textContent = data.arm;
-            
-            // Atualizar sliders
-            if (data.arm_positions) {
-                for (let i = 0; i < 5; i++) {
-                    const slider = document.querySelector(`[data-servo="${i}"]`);
-                    const value = document.getElementById(`servo-${i}`);
-                    if (slider && data.arm_positions[i]) {
-                        slider.value = data.arm_positions[i];
-                                                value.textContent = data.arm_positions[i];
-                    }
-                }
-            }
+            console.log('Welcome:', data);
+            document.getElementById('info-motor').textContent = data.motor;
+            document.getElementById('info-arm').textContent = data.arm;
+            document.getElementById('camera-active').textContent = data.camera;
         });
-
+        
         socket.on('response', (data) => {
             console.log('Response:', data);
             if (data.camera) {
-                document.getElementById('cam-active').textContent = data.camera;
+                document.getElementById('camera-active').textContent = data.camera.toUpperCase();
+                document.getElementById('info-camera').textContent = data.camera.toUpperCase();
             }
         });
-
+        
         function sendCommand(cmd, params = {}) {
             socket.emit('command', { cmd, params });
+            document.getElementById('info-last-cmd').textContent = cmd;
         }
-
-        // ===== MOVIMENTO =====
-        function drive(vx, vy, vz) {
-            sendCommand('drive', { vx, vy, vz });
+        
+        function drive(vx = 0, vy = 0, vz = 0) {
+            const factor = speed / 1500;
+            sendCommand('drive', {
+                vx: vx * factor,
+                vy: vy * factor,
+                vz: vz * factor
+            });
         }
-
+        
         function stop() {
             sendCommand('stop');
         }
-
-        document.getElementById('btn-fwd').onmousedown = () => drive(1,0,0);
-        document.getElementById('btn-back').onmousedown = () => drive(-1,0,0);
-        document.getElementById('btn-left').onmousedown = () => drive(0,0,1);
-        document.getElementById('btn-right').onmousedown = () => drive(0,0,-1);
-        document.getElementById('btn-stop').onclick = stop;
-
-        document.querySelectorAll('.btn').forEach(btn => {
-            btn.onmouseup = stop;
-            btn.onmouseleave = stop;
+        
+        function moveHead(yaw, pitch) {
+            sendCommand('head', { yaw, pitch });
+        }
+        
+        // Botões de movimento
+        const btns = [
+            ['btn-forward', () => drive(1, 0, 0)],
+            ['btn-backward', () => drive(-1, 0, 0)],
+            ['btn-left', () => drive(0, 0, 1)],
+            ['btn-right', () => drive(0, 0, -1)]
+        ];
+        
+        btns.forEach(([id, fn]) => {
+            const btn = document.getElementById(id);
+            btn.addEventListener('mousedown', fn);
+            btn.addEventListener('touchstart', fn);
+            btn.addEventListener('mouseup', stop);
+            btn.addEventListener('touchend', stop);
+            btn.addEventListener('mouseleave', stop);
         });
-
-        // ===== VELOCIDADE =====
-        const speedSlider = document.getElementById('speed');
-        const speedVal = document.getElementById('speed-val');
-
+        
+        document.getElementById('btn-stop').addEventListener('click', stop);
+        
+        // Slider de velocidade
+        const speedSlider = document.getElementById('speed-slider');
+        const speedValue = document.getElementById('speed-value');
+        
         speedSlider.addEventListener('input', (e) => {
             speed = parseInt(e.target.value);
-            speedVal.textContent = speed;
+            speedValue.textContent = speed;
         });
-
-        // ===== SERVOS =====
-        document.querySelectorAll('.servo').forEach(slider => {
-            slider.addEventListener('input', (e) => {
-                const servo = parseInt(e.target.dataset.servo);
-                const angle = parseInt(e.target.value);
-                document.getElementById(`servo-${servo}`).textContent = angle;
-
-                sendCommand('servo', { servo, angle });
-            });
+        
+        // Sliders de cabeça
+        const yawSlider = document.getElementById('head-yaw');
+        const pitchSlider = document.getElementById('head-pitch');
+        const yawValue = document.getElementById('yaw-value');
+        const pitchValue = document.getElementById('pitch-value');
+        
+        yawSlider.addEventListener('input', (e) => {
+            const val = parseInt(e.target.value);
+            yawValue.textContent = val;
+            moveHead(val, parseInt(pitchSlider.value));
         });
-
-        // ===== CÂMERA =====
-        function setCameraMode(mode) {
-            sendCommand('camera_mode', { mode });
-            document.querySelectorAll('.camera-btn').forEach(b => b.classList.remove('active'));
-            document.getElementById(`cam-${mode}`).classList.add('active');
-        }
-
-        // ===== TECLADO =====
-        let keys = {};
+        
+        pitchSlider.addEventListener('input', (e) => {
+            const val = parseInt(e.target.value);
+            pitchValue.textContent = val;
+            moveHead(parseInt(yawSlider.value), val);
+        });
+        
+        // Teclado
+        let keyPressed = {};
+        
         document.addEventListener('keydown', (e) => {
-            if (keys[e.key]) return;
-            keys[e.key] = true;
-
+            if (keyPressed[e.key]) return;
+            keyPressed[e.key] = true;
+            
             switch(e.key.toLowerCase()) {
-                case 'w': drive(1,0,0); break;
-                case 's': drive(-1,0,0); break;
-                case 'a': drive(0,0,1); break;
-                case 'd': drive(0,0,-1); break;
-                case ' ': stop(); break;
+                case 'w': drive(1, 0, 0); break;
+                case 's': drive(-1, 0, 0); break;
+                case 'a': drive(0, 0, 1); break;
+                case 'd': drive(0, 0, -1); break;
+                case ' ': stop(); e.preventDefault(); break;
             }
         });
-
+        
         document.addEventListener('keyup', (e) => {
-            keys[e.key] = false;
-            stop();
+            keyPressed[e.key] = false;
+            if (['w', 's', 'a', 'd'].includes(e.key.toLowerCase())) {
+                stop();
+            }
         });
+        
+        // Status periódico
+        setInterval(() => {
+            fetch('/status')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('info-camera').textContent = data.camera_active;
+                    document.getElementById('camera-active').textContent = data.camera_active;
+                    document.getElementById('info-motor').textContent = data.motor;
+                    document.getElementById('info-arm').textContent = data.arm;
+                })
+                .catch(() => {});
+        }, 2000);
     </script>
 </body>
 </html>
 """
+
+(TEMPLATE_DIR / 'control.html').write_text(HTML_TEMPLATE, encoding='utf-8')
+
+# ==========================================
+# MAIN
+# ==========================================
+
 def main():
-    camera_system.start()
-    socketio.run(app, host='0.0.0.0', port=5000)
+    print("\n" + "="*60)
+    print("🤖 EVA FLASK SERVER - DUAL CAMERA SYSTEM")
+    print("="*60)
+    print("\nSistema de Câmeras:")
+    print("  📹 USB REDRAGON → Navegação")
+    print("  📷 Pi Camera → Braço/Cabeça")
+    print("  🔄 Troca automática inteligente")
+    print("\nRecursos:")
+    print(f"  🚗 Motor: {'OK' if robot.motor else 'Não disponível'}")
+    print(f"  🦾 Braço: {'OK' if robot.arm else 'Não disponível'}")
+    print("\n" + "="*60)
+    
+    # Iniciar câmeras
+    if not camera_system.start():
+        print("⚠️ Sistema de câmeras não iniciou completamente")
+    
+    # Iniciar servidor
+    try:
+        print("\n🚀 Servidor iniciando...")
+        print("   Porta: 5000")
+        print("\n📱 Acesse:")
+        print("   http://<IP_DO_RASPBERRY>:5000")
+        print("\n💡 Controles:")
+        print("   • Movimento: WASD ou botões (USB Camera)")
+        print("   • Cabeça: Sliders Yaw/Pitch (Pi Camera)")
+        print("   • Auto-switch: 3s parado → volta USB")
+        print("\n" + "="*60 + "\n")
+        
+        socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
+    
+    except KeyboardInterrupt:
+        print("\n\n⚠️ Ctrl+C detectado")
+    
+    finally:
+        print("\n🔧 Encerrando...")
+        camera_system.stop()
+        robot.cleanup()
+        print("✅ Servidor encerrado\n")
+
 
 if __name__ == '__main__':
     main()
