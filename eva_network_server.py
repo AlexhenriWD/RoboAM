@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """
-EVA ROBOT NETWORK SERVER (Raspberry Pi)
+EVA ROBOT NETWORK SERVER (Raspberry Pi) - CORRIGIDO
 - Controle manual real via PC (WebSocket)
-- Ownership: manual sempre ganha no drive
-- TTL em comandos (evita comando fantasma)
-- Watchdog: se perder comando/heartbeat -> STOP
-- State stream: envia telemetria em broadcast
-
-Compatível com seu ActuatorServer atual.
+- CORREÇÃO: Assinatura do handler compatível com websockets modernos
 """
 
 from __future__ import annotations
@@ -35,24 +30,16 @@ except Exception as e:
 
 @dataclass
 class OwnershipConfig:
-    # Se manual mandar qualquer comando válido recentemente, ele vira dono do drive.
     manual_hold_seconds: float = 1.0
-    # Se ficar sem comandos/heartbeat por esse tempo, STOP.
     watchdog_timeout_seconds: float = 0.6
 
 
 class ControlArbiter:
-    """
-    Decide quem tem autoridade.
-    Regra MVP:
-    - E-STOP sempre ganha
-    - Manual ganha do resto no drive quando ativo recentemente
-    - EVA só manda no drive quando manual não está ativo
-    """
+    """Decide quem tem autoridade no controle"""
 
     def __init__(self, cfg: OwnershipConfig):
         self.cfg = cfg
-        self.control_owner: str = "none"  # "manual" | "eva" | "none"
+        self.control_owner: str = "none"
         self.last_manual_ts: float = 0.0
         self.last_any_cmd_ts: float = now_s()
         self.estop: bool = False
@@ -74,7 +61,6 @@ class ControlArbiter:
             return False, "estop_active"
         if source == "manual":
             return True, "ok"
-        # EVA/script só podem dirigir se manual não estiver ativo
         if self.manual_active():
             return False, "manual_override"
         return True, "ok"
@@ -85,7 +71,7 @@ class ControlArbiter:
     def set_estop(self, value: bool):
         self.estop = value
         if value:
-            self.control_owner = "manual"  # estop normalmente vem do operador
+            self.control_owner = "manual"
 
 
 class RobotWebSocketServer:
@@ -110,7 +96,6 @@ class RobotWebSocketServer:
         self._state_task: Optional[asyncio.Task] = None
         self._watchdog_task: Optional[asyncio.Task] = None
 
-        # Debug/telemetria
         self.stats = {
             "total_connections": 0,
             "total_commands": 0,
@@ -126,12 +111,12 @@ class RobotWebSocketServer:
         print(f"   Porta: {self.port}")
         print()
 
-        # tasks
         self._state_task = asyncio.create_task(self._broadcast_state_loop())
         self._watchdog_task = asyncio.create_task(self._watchdog_loop())
 
+        # ✅ CORREÇÃO: Removido 'path' do handler
         async with websockets.serve(
-            self._handle_client,
+            self._handle_client,  # Sem 'path' agora
             self.host,
             self.port,
             ping_interval=20,
@@ -139,9 +124,11 @@ class RobotWebSocketServer:
             max_size=2_000_000
         ):
             print("✅ Servidor rodando. Aguardando conexões...\n")
-            await asyncio.Future()  # run forever
+            await asyncio.Future()
 
-    async def _handle_client(self, websocket, path):
+    # ✅ CORREÇÃO: Removido parâmetro 'path'
+    async def _handle_client(self, websocket):
+        """Handler corrigido - sem 'path'"""
         client_id = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
         print(f"📡 Cliente conectado: {client_id}")
         self.clients.add(websocket)
@@ -182,7 +169,7 @@ class RobotWebSocketServer:
         msg_type = msg.get("type")
         request_id = msg.get("request_id")
 
-        # Compat: heartbeat/get_state antigos ainda funcionam
+        # Compat: heartbeat/get_state
         if msg_type in ("heartbeat", "get_state"):
             result = await self._handle_legacy(msg_type)
             await websocket.send(json.dumps({
@@ -197,7 +184,7 @@ class RobotWebSocketServer:
             await self._send_error(websocket, "unknown_type", request_id=request_id)
             return
 
-        # ===== Novo envelope =====
+        # Processar comando
         env = parse_command(msg)
         received_ts = now_s()
 
@@ -212,7 +199,7 @@ class RobotWebSocketServer:
             }))
             return
 
-        # E-STOP/STOP/heartbeat: sempre aceitos
+        # Heartbeat
         if env.cmd in ("heartbeat",):
             self.arbiter.note_command(env.source)
             await websocket.send(json.dumps({
@@ -223,6 +210,7 @@ class RobotWebSocketServer:
             }))
             return
 
+        # E-STOP
         if env.cmd in ("estop",):
             self.arbiter.note_command(env.source)
             self.arbiter.set_estop(True)
@@ -235,6 +223,7 @@ class RobotWebSocketServer:
             }))
             return
 
+        # STOP
         if env.cmd in ("stop",):
             self.arbiter.note_command(env.source)
             self.actuator.stop()
@@ -255,7 +244,7 @@ class RobotWebSocketServer:
             }))
             return
 
-        # ===== Drive / Head =====
+        # DRIVE
         if env.cmd == "drive":
             self.arbiter.note_command(env.source)
             allowed, reason = self.arbiter.can_drive(env.source)
@@ -268,12 +257,10 @@ class RobotWebSocketServer:
                 }))
                 return
 
-            # vx/vy/vz -1..1
             vx = clamp(as_float(env.params.get("vx", 0.0), 0.0), -1.0, 1.0)
             vy = clamp(as_float(env.params.get("vy", 0.0), 0.0), -1.0, 1.0)
             vz = clamp(as_float(env.params.get("vz", 0.0), 0.0), -1.0, 1.0)
 
-            # Normalização mecanum (evita saturar)
             m = max(1.0, abs(vx) + abs(vy) + abs(vz))
             vx, vy, vz = vx / m, vy / m, vz / m
 
@@ -287,15 +274,14 @@ class RobotWebSocketServer:
             }))
             return
 
+        # HEAD
         if env.cmd == "head":
             self.arbiter.note_command(env.source)
 
-            # MVP: yaw/pitch em graus absolutos (0..180)
             yaw = env.params.get("yaw", None)
             pitch = env.params.get("pitch", None)
             smooth = bool(env.params.get("smooth", True))
 
-            # aceitar None
             yaw_i = as_int(yaw, 0) if yaw is not None else None
             pitch_i = as_int(pitch, 0) if pitch is not None else None
 
@@ -312,7 +298,6 @@ class RobotWebSocketServer:
         await self._send_error(websocket, f"unknown_cmd:{env.cmd}", request_id=request_id)
 
     async def _handle_legacy(self, msg_type: str) -> Dict[str, Any]:
-        # Mantém compat com seu código atual (evita quebrar tudo enquanto migramos)
         if msg_type == "get_state":
             return self._get_state_payload()
         if msg_type == "heartbeat":
@@ -323,8 +308,6 @@ class RobotWebSocketServer:
 
     def _get_state_payload(self) -> Dict[str, Any]:
         state = self.actuator.get_state()
-
-        # acrescentar ownership + estop + watchdog info
         state["control_owner"] = "manual" if self.arbiter.manual_active() else self.arbiter.control_owner
         state["estop"] = self.arbiter.estop
         state["watchdog_timeout_s"] = self.cfg.watchdog_timeout_seconds
@@ -349,7 +332,7 @@ class RobotWebSocketServer:
                             disconnected.add(ws)
                     self.clients -= disconnected
 
-                await asyncio.sleep(0.1)  # 10 Hz state stream
+                await asyncio.sleep(0.1)
             except Exception as e:
                 print(f"⚠️ broadcast loop error: {e}")
                 await asyncio.sleep(1.0)
@@ -358,7 +341,6 @@ class RobotWebSocketServer:
         while True:
             try:
                 if self.arbiter.watchdog_expired():
-                    # watchdog local: parar sem dó
                     self.actuator.stop()
                 await asyncio.sleep(0.1)
             except Exception:
@@ -377,18 +359,15 @@ async def main():
         print("❌ Rode isso no Raspberry com hardware/arquivos presentes.")
         return
 
-    # Inicializar robô
     robot = EvaRobotCore()
     ok = robot.initialize(enable_arm=True, enable_cameras=False)
     if not ok:
         print("❌ Falha ao inicializar hardware")
         return
 
-    # Actuator server (corpo)
     actuator = ActuatorServer(robot)
     actuator.start_monitoring()
 
-    # EVA integration (fica ligado, mas drive vai ser bloqueado quando manual ativo)
     eva_integration = EVAIntegration(actuator)
     eva_integration.enable_autonomous()
 
