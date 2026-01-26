@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>EVA Robot - Controle Completo</title>
+    <title>EVA Robot - Controle Remoto</title>
     <style>
         * {
             margin: 0;
@@ -27,7 +27,40 @@
         
         .header h1 {
             font-size: 28px;
-            margin-bottom: 5px;
+            margin-bottom: 10px;
+        }
+        
+        .connection-config {
+            background: rgba(255,255,255,0.1);
+            padding: 10px;
+            border-radius: 8px;
+            margin: 10px auto;
+            max-width: 500px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .connection-config input {
+            flex: 1;
+            padding: 8px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        .connection-config button {
+            padding: 8px 20px;
+            border: none;
+            border-radius: 4px;
+            background: #4ade80;
+            color: #000;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        
+        .connection-config button:hover {
+            background: #22c55e;
         }
         
         .status-bar {
@@ -284,7 +317,14 @@
 </head>
 <body>
     <div class="header">
-        <h1>🤖 EVA Robot - Sistema de Controle</h1>
+        <h1>🤖 EVA Robot - Controle Remoto</h1>
+        
+        <!-- Configuração de Conexão -->
+        <div class="connection-config">
+            <input type="text" id="robot-ip" placeholder="IP do Raspberry (ex: 192.168.1.100)" value="">
+            <button id="btn-connect">Conectar</button>
+        </div>
+        
         <div class="status-bar">
             <div class="status-item">
                 <div class="status-dot" id="status-dot"></div>
@@ -308,7 +348,7 @@
             <h2>📹 Câmera ao Vivo</h2>
             <div class="video-container">
                 <img id="camera-feed" alt="Camera Feed">
-                <div class="camera-badge" id="camera-badge">USB WEBCAM</div>
+                <div class="camera-badge" id="camera-badge">AGUARDANDO...</div>
             </div>
         </div>
         
@@ -413,16 +453,16 @@
     
     <script>
         // Configuração
-        const WS_PORT = 8765;  // Porta WebSocket
-        const WS_URL = `ws://${window.location.hostname}:${WS_PORT}`;
-        
-        console.log('🔗 Conectando a:', WS_URL);
+        const WS_PORT = 8765;
         
         // Estado
         let ws = null;
         let connected = false;
+        let robotIP = localStorage.getItem('robotIP') || '';
         
         // Elementos DOM
+        const robotIPInput = document.getElementById('robot-ip');
+        const btnConnect = document.getElementById('btn-connect');
         const statusDot = document.getElementById('status-dot');
         const statusText = document.getElementById('status-text');
         const cameraFeed = document.getElementById('camera-feed');
@@ -439,20 +479,55 @@
         // Checkbox
         const enableArmCamera = document.getElementById('enable-arm-camera');
         
+        // Carregar IP salvo
+        if (robotIP) {
+            robotIPInput.value = robotIP;
+        }
+        
         // ==========================================
-        // WEBSOCKET
+        // CONEXÃO
         // ==========================================
         
-        function connect() {
-            console.log('Conectando ao servidor...');
+        btnConnect.addEventListener('click', () => {
+            const ip = robotIPInput.value.trim();
             
-            ws = new WebSocket(WS_URL);
+            if (!ip) {
+                alert('Digite o IP do Raspberry Pi!');
+                return;
+            }
+            
+            // Salvar IP
+            localStorage.setItem('robotIP', ip);
+            robotIP = ip;
+            
+            // Desconectar se já conectado
+            if (ws) {
+                ws.close();
+            }
+            
+            // Conectar
+            connect();
+        });
+        
+        function connect() {
+            if (!robotIP) {
+                console.error('IP não configurado');
+                return;
+            }
+            
+            const wsURL = `ws://${robotIP}:${WS_PORT}`;
+            console.log('🔗 Conectando a:', wsURL);
+            statusText.textContent = 'Conectando...';
+            
+            ws = new WebSocket(wsURL);
             
             ws.onopen = () => {
                 console.log('✅ Conectado!');
                 connected = true;
                 statusDot.classList.add('connected');
                 statusText.textContent = 'Conectado';
+                btnConnect.textContent = 'Desconectar';
+                btnConnect.style.background = '#f87171';
             };
             
             ws.onclose = () => {
@@ -460,13 +535,21 @@
                 connected = false;
                 statusDot.classList.remove('connected');
                 statusText.textContent = 'Desconectado';
+                btnConnect.textContent = 'Conectar';
+                btnConnect.style.background = '#4ade80';
                 
-                // Reconectar
-                setTimeout(connect, 2000);
+                // Reconectar automaticamente
+                setTimeout(() => {
+                    if (robotIP && !connected) {
+                        console.log('🔄 Tentando reconectar...');
+                        connect();
+                    }
+                }, 3000);
             };
             
             ws.onerror = (error) => {
-                console.error('Erro WebSocket:', error);
+                console.error('❌ Erro WebSocket:', error);
+                statusText.textContent = 'Erro de conexão';
             };
             
             ws.onmessage = (event) => {
@@ -478,6 +561,14 @@
                 }
             };
         }
+        
+        // Desconectar ao clicar novamente
+        btnConnect.addEventListener('click', () => {
+            if (connected && ws) {
+                ws.close();
+                connected = false;
+            }
+        });
         
         function handleMessage(msg) {
             const type = msg.type;
@@ -510,7 +601,8 @@
         
         function sendCommand(cmd, params = {}) {
             if (!connected) {
-                console.warn('Não conectado');
+                console.warn('⚠️ Não conectado');
+                statusText.textContent = 'Não conectado!';
                 return;
             }
             
@@ -658,7 +750,8 @@
         // INICIALIZAÇÃO
         // ==========================================
         
-        connect();
+        console.log('🤖 EVA Robot Control Interface carregada');
+        console.log('💡 Configure o IP do Raspberry Pi e clique em "Conectar"');
     </script>
 </body>
 </html>
