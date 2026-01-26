@@ -23,6 +23,32 @@ class EVANetworkServer:
             print("🚀 Servidor Rodando em ws://IP_DO_RASPBERRY:8765")
             await asyncio.Future()
 
+    # Adicione este método dentro da classe EVANetworkServer
+    async def _process_request(self, path, request_headers):
+        """Corrige o erro de 'keep-alive' forçando o header correto"""
+        if "Connection" in request_headers and request_headers["Connection"] == "keep-alive":
+            request_headers["Connection"] = "Upgrade"
+        return None
+
+    # No método start, modifique a linha do 'serve':
+    async def start(self):
+        print("🚀 Iniciando servidor...")
+        if not self.robot.initialize():
+            return
+
+        self.running = True
+        self._start_http_server()
+        
+        # Adicionamos o process_request para limpar o erro de handshake
+        async with serve(
+            self._handle_client, 
+            "0.0.0.0", 
+            self.ws_port,
+            process_request=self._process_request # <--- ADICIONE ISSO AQUI
+        ):
+            print(f"🌐 Conecte o controle no IP do Raspberry na porta {self.ws_port}")
+            await asyncio.Future()
+
     async def _handler(self, websocket):
         self.clients.add(websocket)
         try:
