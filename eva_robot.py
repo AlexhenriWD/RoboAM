@@ -9,7 +9,10 @@ import time
 import threading
 from typing import Optional, Dict, Union, TYPE_CHECKING
 from enum import Enum
+import sys
+import os
 
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 # Importar do robot_core original
 try:
     from robot_core import Servo, Ordinary_Car, Ultrasonic, ADC
