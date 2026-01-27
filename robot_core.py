@@ -15,7 +15,7 @@ from picamera2.outputs import FileOutput
 from libcamera import Transform
 from threading import Condition
 import io
-from parameter import ParameterManager
+from hardware_config import ParameterManager
 
 
 # ============================================================================

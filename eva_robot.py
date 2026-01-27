@@ -17,8 +17,10 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 try:
     from robot_core import Servo, Ordinary_Car, Ultrasonic, ADC
     HARDWARE_AVAILABLE = True
-except ImportError:
+except Exception as e:
     print("⚠️  robot_core não encontrado. Usando modo simulação.")
+    print("ERRO REAL:", e)
+
     # Criar classes dummy para type checking
     class Servo:  # type: ignore
         pass
