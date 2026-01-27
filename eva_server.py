@@ -148,37 +148,20 @@ class EVAServer:
         """Loop de processamento de comandos"""
         while not self.stop_event.is_set() and self.is_running:
             try:
-                if not self.server.is_video_server_connected():
-                    time.sleep(0.1)
+                queue = self.server.read_data_from_command_server()
+                if queue.qsize() == 0:
+                    time.sleep(0.01)
                     continue
 
-                # 🔒 se câmera está trocando, NÃO streama
-                if self.robot.camera_manager.switching:
-                    time.sleep(0.02)
-                    continue
+                client_address, message = queue.get()
+                print(f"📨 Comando recebido de {client_address}: {message}")
 
-                frame_data = self.robot.get_camera_frame_encoded(quality=70)
-
-                # 🚫 NUNCA envie frame inválido
-                if frame_data is None or len(frame_data) < 100:
-                    time.sleep(0.02)
-                    continue
-
-                length = len(frame_data)
-                packet = struct.pack('<L', length) + frame_data
-
-                try:
-                    self.server.send_data_to_video_client(packet)
-                except (BrokenPipeError, ConnectionResetError, OSError) as e:
-                    print(f"📴 Cliente de vídeo caiu: {e}")
-                    time.sleep(0.2)
-                    continue
-
-                time.sleep(1 / 15)
+                response = self._process_command(message)
+                self.server.send_data_to_command_client(response, client_address)
 
             except Exception as e:
-                print(f"⚠️ Erro no streaming de vídeo: {e}")
-                time.sleep(0.1)
+                print(f"⚠️ Erro no command loop: {e}")
+                time.sleep(0.05)
 
     
     def _process_command(self, command: str) -> str:
@@ -298,30 +281,34 @@ class EVAServer:
             return f"ERROR:{str(e)}"
     
     def _video_loop(self):
-        """Loop de streaming de vídeo"""
         while not self.stop_event.is_set() and self.is_running:
             try:
-                # Obter frame
+                if not self.server.is_video_server_connected():
+                    time.sleep(0.1)
+                    continue
+
+                if self.robot.camera_manager.switching:
+                    time.sleep(0.02)
+                    continue
+
                 frame_data = self.robot.get_camera_frame_encoded(quality=70)
-                
-                if frame_data is not None:
-                    # Enviar frame no formato: [length:4bytes][jpeg_data]
-                    length = len(frame_data)
-                    packet = struct.pack('<L', length) + frame_data
-                    
-                    self.server.send_data_to_video_client(packet)
-                
-                time.sleep(0.033)  # ~30 FPS
-                
-            except (ConnectionResetError, BrokenPipeError, OSError) as e:
-                # Client fechou / caiu. Não mata o servidor inteiro.
+                if frame_data is None or len(frame_data) < 100:
+                    time.sleep(0.02)
+                    continue
+
+                packet = struct.pack('<L', len(frame_data)) + frame_data
+                self.server.send_data_to_video_client(packet)
+
+                time.sleep(1 / 15)
+
+            except (BrokenPipeError, ConnectionResetError, OSError) as e:
                 print(f"📴 Cliente de vídeo caiu: {e}")
                 time.sleep(0.2)
-                continue
-                
+
             except Exception as e:
-                print(f"⚠️  Erro no streaming de vídeo: {e}")
+                print(f"⚠️ Erro no vídeo: {e}")
                 time.sleep(0.1)
+
     
     def get_status(self) -> dict:
         """Retorna status do servidor"""
