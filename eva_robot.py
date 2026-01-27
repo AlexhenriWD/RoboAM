@@ -71,7 +71,7 @@ class EVARobot:
             print("⚠️ Iniciando sem câmera")
 
         self.arm.move_to_home()
-        STATE.update(mode=self.mode.value)
+        STATE.update(mode=self.mode)
         return True
 
     def stop(self):
