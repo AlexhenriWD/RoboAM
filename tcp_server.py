@@ -67,6 +67,7 @@ class TCPServer:
                 else:
                     try:
                         # Receive data from the client
+                        
                         data = s.recv(1024)
                         if data:
                             client_address = self.client_sockets[s]
