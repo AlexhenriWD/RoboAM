@@ -148,27 +148,38 @@ class EVAServer:
         """Loop de processamento de comandos"""
         while not self.stop_event.is_set() and self.is_running:
             try:
-                cmd_queue = self.server.read_data_from_command_server()
-                
-                if cmd_queue.qsize() > 0:
-                    client_address, message = cmd_queue.get()
-                    print(f"📨 Comando recebido de {client_address}: {message}")
-                    
-                    # Processar comando
-                    response = self._process_command(message)
-                    
-                    # Enviar resposta
-                    if response:
-                        self.server.send_data_to_command_client(
-                            response.encode('utf-8'),
-                            client_address
-                        )
-                
-                time.sleep(0.01)
-                
+                if not self.server.is_video_server_connected():
+                    time.sleep(0.1)
+                    continue
+
+                # 🔒 se câmera está trocando, NÃO streama
+                if self.robot.camera_manager.switching:
+                    time.sleep(0.02)
+                    continue
+
+                frame_data = self.robot.get_camera_frame_encoded(quality=70)
+
+                # 🚫 NUNCA envie frame inválido
+                if frame_data is None or len(frame_data) < 100:
+                    time.sleep(0.02)
+                    continue
+
+                length = len(frame_data)
+                packet = struct.pack('<L', length) + frame_data
+
+                try:
+                    self.server.send_data_to_video_client(packet)
+                except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                    print(f"📴 Cliente de vídeo caiu: {e}")
+                    time.sleep(0.2)
+                    continue
+
+                time.sleep(1 / 15)
+
             except Exception as e:
-                print(f"⚠️  Erro no loop de comandos: {e}")
+                print(f"⚠️ Erro no streaming de vídeo: {e}")
                 time.sleep(0.1)
+
     
     def _process_command(self, command: str) -> str:
         """

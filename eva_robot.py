@@ -87,8 +87,8 @@ class EVARobot:
         self.mode = RobotMode.IDLE
         self.running = False
 
-        self.invert_left = 1   # troque para -1 se lado esquerdo estiver invertido
-        self.invert_right = 1  # troque para -1 se lado direito estiver invertido
+        self.invert_left = -1   # troque para -1 se lado esquerdo estiver invertido
+        self.invert_right = -1  # troque para -1 se lado direito estiver invertido
 
 
         print("✅ EVA Robot inicializado")
@@ -189,6 +189,8 @@ class EVARobot:
 
     def switch_camera(self, camera_type: CameraType = None):
         self.camera_manager.switch_camera(camera_type)
+        time.sleep(0.3)  # dá tempo do driver estabilizar
+
         STATE.update(active_camera=self.camera_manager.get_active_camera_type().value)
 
     def get_camera_frame_encoded(self, quality=70):
