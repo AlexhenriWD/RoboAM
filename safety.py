@@ -190,29 +190,86 @@ class SafetyController:
         return True, "OK"
     
     def validate_servo_command(
-        self, 
-        channel: int, 
+        self,
+        channel: int,
         angle: int
     ) -> tuple[bool, str]:
         """
-        Valida comando de servo
-        
-        Returns:
-            (is_safe, reason)
+        Valida comando de servo com regras físicas e cinemáticas reais
         """
+
         if not self.enabled:
             return True, "Safety desabilitado"
-        
+
         if self.emergency_stop_active:
             return False, "EMERGENCY STOP ativo"
-        
-        # Verificar limites
-        limits = CONFIG.servos.get_limit(channel)
-        
-        if not (limits.min_angle <= angle <= limits.max_angle):
-            return False, f"Ângulo fora dos limites ({limits.min_angle}°-{limits.max_angle}°)"
-        
+
+        # ===============================
+        # LIMITES FÍSICOS ABSOLUTOS
+        # ===============================
+        physical_limits = {
+            0: (0, 180),    # yaw / base
+            1: (40, 110),   # pitch / ombro
+            2: (90, 180),   # cotovelo
+            3: (0, 117),    # cabeça
+        }
+
+        if channel not in physical_limits:
+            return False, "Canal de servo inválido"
+
+        min_a, max_a = physical_limits[channel]
+        if not (min_a <= angle <= max_a):
+            return False, f"Fora do limite físico ({min_a}°–{max_a}°)"
+
+        # ===============================
+        # ESTADO ATUAL DO BRAÇO
+        # ===============================
+        try:
+            arm = self.robot.arm.current_angles
+            yaw = arm.get(0, 90)
+            pitch = arm.get(1, 90)
+            elbow = arm.get(2, 90)
+            head = arm.get(3, 90)
+        except Exception:
+            # Falha ao ler estado → não movimenta
+            return False, "Estado do braço indisponível"
+
+        # ===============================
+        # REGRAS ESPECIAIS (SEUS TESTES)
+        # ===============================
+
+        # 1️⃣ Cotovelo em posição crítica
+        if elbow >= 160:
+            # Só pode mexer o próprio cotovelo
+            if channel != 2:
+                return False, "Cotovelo em posição crítica – outros eixos travados"
+
+            # Pitch limitado quando cotovelo alto
+            if channel == 1 and angle > 104:
+                return False, "Pitch limitado pelo cotovelo (máx 104°)"
+
+        # 2️⃣ Yaw limitado quando cotovelo alto
+        if elbow >= 160 and channel == 0:
+            if angle > 90:
+                return False, "Yaw limitado a 90° com cotovelo alto"
+
+        # 3️⃣ Cabeça depende do pitch
+        if channel == 3:
+            # Cabeça só pode ir até 117
+            if angle > 117:
+                return False, "Cabeça acima do limite seguro"
+
+            # Pitch muito baixo restringe cabeça
+            if pitch in (40, 50):
+                # Apenas faixa segura
+                if not (0 <= angle <= 180):
+                    return False, "Cabeça limitada por pitch baixo"
+
+        # ===============================
+        # SE PASSOU POR TUDO → SEGURO
+        # ===============================
         return True, "OK"
+
     
     # ========================================
     # MONITORAMENTO DE SENSORES

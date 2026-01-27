@@ -57,8 +57,8 @@ class EVARobot:
         self.running = False
 
         # Inversão de motores (ajuste se necessário)
-        self.invert_left = 1
-        self.invert_right = 1
+        self.invert_left = -1
+        self.invert_right = -1
 
         print("✅ EVA Robot inicializado")
 
