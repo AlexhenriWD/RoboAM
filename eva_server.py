@@ -11,13 +11,11 @@ import threading
 from typing import Optional
 
 # Importar servidor TCP original
-sys.path.append('/mnt/user-data/uploads')
-from server import Server
+from .server import Server
 
 # EVA Robot
-sys.path.append('/home/claude/eva_robot/core')
-from eva_robot import EVARobot, RobotMode
-from camera_manager import CameraType
+from .eva_robot import EVARobot, RobotMode
+from .camera_manager import CameraType
 
 
 class CommandParser:
