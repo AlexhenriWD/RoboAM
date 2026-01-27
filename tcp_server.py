@@ -25,8 +25,11 @@ class TCPServer:
         self.stop_pipe_r.setblocking(0)
         self.stop_pipe_w.setblocking(0)
         self.binary_mode = False
+        self.read_enabled = True
 
-    def start(self, ip, port, max_clients=1, listen_count=1, binary_mode=False):
+
+    def start(self, ip, port, max_clients=1, listen_count=1, read_enabled=True, binary_mode=False):
+        self.read_enabled = read_enabled
         # Set the maximum number of clients
         self.max_clients = max_clients
         # Create the server socket
@@ -67,7 +70,7 @@ class TCPServer:
                 else:
                     try:
                         # Receive data from the client
-                        
+
                         data = s.recv(1024)
                         if data:
                             client_address = self.client_sockets[s]

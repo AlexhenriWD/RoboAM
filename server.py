@@ -30,8 +30,9 @@ class Server:
     def start_tcp_servers(self, command_port: int = 5000, video_port: int = 8000, max_clients: int = 1, listen_count: int = 1) -> None:
         """Start the TCP servers on specified ports."""
         try:
-            self.command_server.start(self.ip_address, command_port, max_clients, listen_count, binary_mode=False)
-            self.video_server.start(self.ip_address, video_port, max_clients, listen_count, binary_mode=True)
+            self.command_server.start(self.ip_address, command_port, max_clients, listen_count, read_enabled=True)
+            self.video_server.start(self.ip_address, video_port, max_clients, listen_count, read_enabled=False)
+
 
         except Exception as e:
             print(f"Error starting TCP servers: {e}")
