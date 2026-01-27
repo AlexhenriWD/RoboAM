@@ -37,7 +37,7 @@ class ArmController:
             1: 90,  # Pitch
             2: 90,  # Elbow
             3: 90,  # Head
-            4: 70,  # Gripper
+            
         }
         
         # Limites de segurança
@@ -224,21 +224,7 @@ class ArmController:
         self.set_angle(0, 135)  # Yaw direita
         self.set_angle(1, 110)  # Pitch ligeiramente para baixo
     
-    # ========================================================================
-    # CONTROLE DE GARRA
-    # ========================================================================
     
-    def gripper_open(self):
-        """Abrir garra"""
-        return self.set_angle(ServoJoint.GRIPPER.value, 100)
-    
-    def gripper_close(self):
-        """Fechar garra"""
-        return self.set_angle(ServoJoint.GRIPPER.value, 40)
-    
-    def gripper_half(self):
-        """Garra meio aberta"""
-        return self.set_angle(ServoJoint.GRIPPER.value, 70)
     
     # ========================================================================
     # MOVIMENTOS COMPOSTOS

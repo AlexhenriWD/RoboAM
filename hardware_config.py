@@ -101,7 +101,7 @@ class ServoConfig:
         '1': 9,   # Pitch (ombro - altura)
         '2': 10,  # Cotovelo
         '3': 11,  # Cabeça extra
-        '4': 12,  # Garra (opcional)
+       
     }
     
     # Limites seguros (baseado no arm_calibration.py)
@@ -110,7 +110,7 @@ class ServoConfig:
         1: ServoLimits(min_angle=0, max_angle=180, home_angle=90, name="Pitch"),
         2: ServoLimits(min_angle=0, max_angle=180, home_angle=90, name="Cotovelo"),
         3: ServoLimits(min_angle=0, max_angle=180, home_angle=90, name="Cabeça"),
-        4: ServoLimits(min_angle=40, max_angle=100, home_angle=70, name="Garra"),
+       
     }
     
     # Configurações de movimento
