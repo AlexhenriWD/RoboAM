@@ -87,6 +87,10 @@ class EVARobot:
         self.mode = RobotMode.IDLE
         self.running = False
 
+        self.invert_left = 1   # troque para -1 se lado esquerdo estiver invertido
+        self.invert_right = 1  # troque para -1 se lado direito estiver invertido
+
+
         print("✅ EVA Robot inicializado")
 
     # ==================================================
@@ -116,26 +120,34 @@ class EVARobot:
     # MOVIMENTO
     # ==================================================
 
-    def move_forward(self, speed=1500):
-        safe, reason = self.safety.validate_drive_command(1, 0, 0)
-        if not safe:
-            print(f"❌ Movimento bloqueado: {reason}")
-            return
+    def _apply_inv(self, fl, bl, fr, br):
+        fl *= self.invert_left
+        bl *= self.invert_left
+        fr *= self.invert_right
+        br *= self.invert_right
+        return fl, bl, fr, br
 
-        self.motor.set_motor_model(speed, speed, speed, speed)
-        STATE.set_motors(speed, speed, speed, speed)
+    def move_forward(self, speed=1500):
+        fl, bl, fr, br = self._apply_inv(speed, speed, speed, speed)
+        self.motor.set_motor_model(fl, bl, fr, br)
 
     def move_backward(self, speed=1500):
-        self.motor.set_motor_model(-speed, -speed, -speed, -speed)
-        STATE.set_motors(-speed, -speed, -speed, -speed)
+        fl, bl, fr, br = self._apply_inv(-speed, -speed, -speed, -speed)
+        self.motor.set_motor_model(fl, bl, fr, br)
 
     def turn_left(self, speed=1500):
-        self.motor.set_motor_model(-speed, -speed, speed, speed)
-        STATE.set_motors(-speed, -speed, speed, speed)
+        # esquerda pra trás, direita pra frente
+        fl, bl, fr, br = self._apply_inv(-speed, -speed, speed, speed)
+        self.motor.set_motor_model(fl, bl, fr, br)
 
     def turn_right(self, speed=1500):
-        self.motor.set_motor_model(speed, speed, -speed, -speed)
-        STATE.set_motors(speed, speed, -speed, -speed)
+        fl, bl, fr, br = self._apply_inv(speed, speed, -speed, -speed)
+        self.motor.set_motor_model(fl, bl, fr, br)
+
+    def set_motor_inversion(self, invert_left: bool, invert_right: bool):
+        self.invert_left = -1 if invert_left else 1
+        self.invert_right = -1 if invert_right else 1
+        print(f"🔧 Inversão motores: left={invert_left} right={invert_right}")
 
     def stop_motors(self):
         self.motor.set_motor_model(0, 0, 0, 0)

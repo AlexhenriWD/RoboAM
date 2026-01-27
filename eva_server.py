@@ -290,11 +290,6 @@ class EVAServer:
         """Loop de streaming de vídeo"""
         while not self.stop_event.is_set() and self.is_running:
             try:
-                # Verificar se há clientes conectados
-                if not self.server.is_video_server_connected():
-                    time.sleep(0.1)
-                    continue
-                
                 # Obter frame
                 frame_data = self.robot.get_camera_frame_encoded(quality=70)
                 
@@ -306,6 +301,12 @@ class EVAServer:
                     self.server.send_data_to_video_client(packet)
                 
                 time.sleep(0.033)  # ~30 FPS
+                
+            except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                # Client fechou / caiu. Não mata o servidor inteiro.
+                print(f"📴 Cliente de vídeo caiu: {e}")
+                time.sleep(0.2)
+                continue
                 
             except Exception as e:
                 print(f"⚠️  Erro no streaming de vídeo: {e}")
