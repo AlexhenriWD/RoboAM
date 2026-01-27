@@ -12,7 +12,7 @@ from enum import Enum
 
 # Importar do robot_core original
 try:
-    from .robot_core import Servo, Ordinary_Car, Ultrasonic, ADC
+    from robot_core import Servo, Ordinary_Car, Ultrasonic, ADC
     HARDWARE_AVAILABLE = True
 except ImportError:
     print("⚠️  robot_core não encontrado. Usando modo simulação.")

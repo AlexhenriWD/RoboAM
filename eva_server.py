@@ -11,11 +11,11 @@ import threading
 from typing import Optional
 
 # Importar servidor TCP original
-from .server import Server
+from server import Server
 
 # EVA Robot
-from .eva_robot import EVARobot, RobotMode
-from .camera_manager import CameraType
+from eva_robot import EVARobot, RobotMode
+from camera_manager import CameraType
 
 
 class CommandParser:
