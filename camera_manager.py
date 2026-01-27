@@ -49,6 +49,9 @@ class CameraManager:
         self.switching = False
         self.thread: Optional[threading.Thread] = None
 
+        self.rotate_picam = True
+        self.picam_rotation = cv2.ROTATE_90_CLOCKWISE
+
         print("📷 CameraManager (OpenCV, thread-safe) inicializado")
 
     # ==========================================================
@@ -163,13 +166,13 @@ class CameraManager:
 
             ok, frame = cap.read()
             if ok and frame is not None:
-                # Rotação opcional da PiCam
-                if self.active_camera_type == CameraType.PICAM and self.rotate_picam_ccw:
-                    frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                if self.active_camera_type == CameraType.PICAM and self.rotate_picam:
+                    frame = cv2.rotate(frame, self.picam_rotation)
 
                 with self.frame_lock:
                     self.frame = frame
                     self.last_good_frame = frame
+
             else:
                 # Se falhou, não zera frame: mantém last_good_frame para o stream não “sumir”
                 time.sleep(0.01)

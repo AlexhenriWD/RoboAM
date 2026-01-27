@@ -186,10 +186,13 @@ class EVARobot:
     # ==================================================
     # CÂMERA
     # ==================================================
+    import gc
+    gc.collect()
+    time.sleep(0.1)
 
     def switch_camera(self, camera_type: CameraType = None):
         self.camera_manager.switch_camera(camera_type)
-        time.sleep(0.3)  # dá tempo do driver estabilizar
+        time.sleep(0.8)  # dá tempo do driver estabilizar
 
         STATE.update(active_camera=self.camera_manager.get_active_camera_type().value)
 
