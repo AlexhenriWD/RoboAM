@@ -4,21 +4,28 @@ EVA ROBOT - MAIN CONTROLLER
 Sistema principal que integra: motores, câmeras, braço, sensores
 """
 
-from __future__ import annotations
-
 import sys
 import time
 import threading
-from typing import Optional, Dict
+from typing import Optional, Dict, Union, TYPE_CHECKING
 from enum import Enum
 
 # Importar do robot_core original
 try:
-    sys.path.append('/home/pi/eva_robot')
-    from robot_core import Servo, Ordinary_Car, Ultrasonic, ADC
+    from .robot_core import Servo, Ordinary_Car, Ultrasonic, ADC
+    HARDWARE_AVAILABLE = True
 except ImportError:
     print("⚠️  robot_core não encontrado. Usando modo simulação.")
-    Servo = Ordinary_Car = Ultrasonic = ADC = None
+    # Criar classes dummy para type checking
+    class Servo:  # type: ignore
+        pass
+    class Ordinary_Car:  # type: ignore
+        pass
+    class Ultrasonic:  # type: ignore
+        pass
+    class ADC:  # type: ignore
+        pcb_version = 1
+    HARDWARE_AVAILABLE = False
 
 # Módulos locais
 from camera_manager import CameraManager, CameraType
@@ -110,26 +117,26 @@ class EVARobot:
     
     def _init_hardware(self) -> bool:
         """Inicializa hardware básico (motores, sensores)"""
+        if not HARDWARE_AVAILABLE:
+            print("⚠️  Hardware libraries não disponíveis (modo simulação)")
+            return False
+        
         try:
             # Servos
-            if Servo is not None:
-                self.servo = Servo()
-                print("✅ Servos inicializados")
+            self.servo = Servo()
+            print("✅ Servos inicializados")
             
             # Motores
-            if Ordinary_Car is not None:
-                self.motor = Ordinary_Car()
-                print("✅ Motores inicializados")
+            self.motor = Ordinary_Car()
+            print("✅ Motores inicializados")
             
             # Ultrasônico
-            if Ultrasonic is not None:
-                self.ultrasonic = Ultrasonic()
-                print("✅ Sensor ultrasônico inicializado")
+            self.ultrasonic = Ultrasonic()
+            print("✅ Sensor ultrasônico inicializado")
             
             # ADC (bateria, sensores)
-            if ADC is not None:
-                self.adc = ADC()
-                print("✅ ADC inicializado")
+            self.adc = ADC()
+            print("✅ ADC inicializado")
             
             return True
             
