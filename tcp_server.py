@@ -24,8 +24,9 @@ class TCPServer:
         self.stop_pipe_r, self.stop_pipe_w = socket.socketpair()
         self.stop_pipe_r.setblocking(0)
         self.stop_pipe_w.setblocking(0)
+        self.binary_mode = False
 
-    def start(self, ip, port, max_clients=1, listen_count=1):
+    def start(self, ip, port, max_clients=1, listen_count=1, binary_mode=False):
         # Set the maximum number of clients
         self.max_clients = max_clients
         # Create the server socket
@@ -34,6 +35,7 @@ class TCPServer:
         self.server_socket.bind((ip, port))
         self.server_socket.listen(listen_count)
         self.server_socket.setblocking(0)
+        self.binary_mode = binary_mode
         print(f"Server started, listening on {ip}:{port}")
 
         # Start the thread for accepting connections
@@ -68,7 +70,16 @@ class TCPServer:
                         data = s.recv(1024)
                         if data:
                             client_address = self.client_sockets[s]
-                            self.message_queue.put((client_address, data.decode('utf-8')))
+                            if not self.binary_mode:
+                                try:
+                                    message = data.decode('utf-8')
+                                except UnicodeDecodeError:
+                                    return
+                                self.message_queue.put((client_address, message))
+                            else:
+                                # vídeo NÃO recebe dados → ignora
+                                pass
+
                         else:
                             # Remove the client if no data is received
                             client_address = self.client_sockets[s]
