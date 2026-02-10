@@ -101,7 +101,7 @@ class EVAGamepadServer:
             try:
                 self.gamepad = GamepadController(
                     device_path="/dev/input/event5",
-                    deadzone=0.05,      # ✅ Reduzido de 0.15 para 0.05
+                    deadzone=0.02,      # ✅ Reduzido de 0.15 para 0.05
                     smoothing=0.0,      # ✅ Desabilitado para resposta mais rápida
                     auto_detect=True
                 )
@@ -109,7 +109,7 @@ class EVAGamepadServer:
                 if self.gamepad.start():
                     # Criar modo drone
                     config = DroneControlConfig(
-                        drive_sensitivity=0.8,
+                        drive_sensitivity=1.0,
                         head_pan_sensitivity=1.0,
                         head_tilt_sensitivity=0.8
                     )

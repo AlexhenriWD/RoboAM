@@ -181,6 +181,14 @@ class GamepadController:
         try:
             self.device = InputDevice(self.device_path)
             print(f"✅ Conectado: {self.device.name}")
+
+            # 🔥 CRÍTICO: garantir exclusividade (DualSense BT)
+            try:
+                self.device.grab()
+                print("🔒 Device grabbed (exclusive access)")
+            except Exception as e:
+                print(f"⚠️  Não foi possível grab device: {e}")
+
             
             # Detectar ranges dos eixos
             self._detect_axis_ranges()
@@ -204,7 +212,12 @@ class GamepadController:
             self.thread.join(timeout=2.0)
         
         if self.device:
+            try:
+                self.device.ungrab()
+            except Exception:
+                pass
             self.device.close()
+
         
         print("✅ Gamepad desconectado")
     
@@ -249,19 +262,26 @@ class GamepadController:
             self._process_button(event.code, event.value)
         
         # Sync - estado completo atualizado
+        updated = False
+
+        if event.type == ecodes.EV_ABS:
+            self._process_axis(event.code, event.value)
+            updated = True
+
+        elif event.type == ecodes.EV_KEY:
+            self._process_button(event.code, event.value)
+            updated = True
+
         elif event.type == ecodes.EV_SYN:
+            updated = True
+
+        if updated:
             with self._state_lock:
                 self.state.timestamp = time.time()
-                
-                # Aplicar deadzone e smoothing
                 self._apply_deadzone_and_smoothing()
-                
-                # Callback
                 if self.on_state_change:
-                    try:
-                        self.on_state_change(self.get_state())
-                    except Exception as e:
-                        print(f"⚠️  Erro em callback: {e}")
+                    self.on_state_change(self.get_state())
+
     
     def _process_axis(self, code: int, value: int):
         """Processa eixo analógico"""

@@ -161,8 +161,8 @@ class DroneControlMode:
         
         # 🐛 DEBUG - verificar se callback está sendo chamado
         # Descomentar para debug:
-        # if abs(state.left_x) > 0.05 or abs(state.left_y) > 0.05:
-        #     print(f"🎮 UPDATE: LX={state.left_x:.2f} LY={state.left_y:.2f}")
+        if abs(state.left_x) > 0.05 or abs(state.left_y) > 0.05:
+            print(f"🎮 UPDATE: LX={state.left_x:.2f} LY={state.left_y:.2f}")
         
         # Determinar modo de velocidade
         self._update_speed_mode(state)
