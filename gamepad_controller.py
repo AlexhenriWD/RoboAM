@@ -252,16 +252,6 @@ class GamepadController:
 
     
     def _process_event(self, event):
-        """Processa evento do gamepad"""
-        # Eixo analógico
-        if event.type == ecodes.EV_ABS:
-            self._process_axis(event.code, event.value)
-        
-        # Botão
-        elif event.type == ecodes.EV_KEY:
-            self._process_button(event.code, event.value)
-        
-        # Sync - estado completo atualizado
         updated = False
 
         if event.type == ecodes.EV_ABS:
@@ -281,6 +271,7 @@ class GamepadController:
                 self._apply_deadzone_and_smoothing()
                 if self.on_state_change:
                     self.on_state_change(self.get_state())
+
 
     
     def _process_axis(self, code: int, value: int):

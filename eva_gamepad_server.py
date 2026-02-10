@@ -103,7 +103,7 @@ class EVAGamepadServer:
                     device_path="/dev/input/event5",
                     deadzone=0.02,      # ✅ Reduzido de 0.15 para 0.05
                     smoothing=0.0,      # ✅ Desabilitado para resposta mais rápida
-                    auto_detect=True
+                    auto_detect=False
                 )
                 
                 if self.gamepad.start():

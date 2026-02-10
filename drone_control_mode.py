@@ -288,16 +288,17 @@ class DroneControlMode:
         # Mecanum permite movimento omnidirecional
         speed_base = 1500  # PWM base
         
+        scale = 400  # ajuste fino depois (300–500)
         # Fórmula Mecanum:
         # FL = vx - vy - vz
         # BL = vx + vy - vz
         # FR = vx + vy + vz
         # BR = vx - vy + vz
         
-        fl = int(speed_base * (vx - vy - vz))
-        bl = int(speed_base * (vx + vy - vz))
-        fr = int(speed_base * (vx + vy + vz))
-        br = int(speed_base * (vx - vy + vz))
+        fl = int(speed_base + scale * (vx - vy - vz))
+        bl = int(speed_base + scale * (vx + vy - vz))
+        fr = int(speed_base + scale * (vx + vy + vz))
+        br = int(speed_base + scale * (vx - vy + vz))
         
         # Aplicar ao robô
         self.robot.motor.set_motor_model(fl, bl, fr, br)
