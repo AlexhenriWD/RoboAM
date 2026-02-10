@@ -158,7 +158,11 @@ class DroneControlMode:
         """Callback chamado quando estado do gamepad muda"""
         if not self.enabled:
             return
-        
+        # ❤️ Manter o robô vivo enquanto o modo drone está ativo
+        try:
+            self.robot.safety.heartbeat()
+        except Exception:
+            pass
         # 🐛 DEBUG - verificar se callback está sendo chamado
         # Descomentar para debug:
         if abs(state.left_x) > 0.05 or abs(state.left_y) > 0.05:
