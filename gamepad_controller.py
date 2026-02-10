@@ -229,17 +229,18 @@ class GamepadController:
     
     def _read_loop(self):
         """Loop de leitura de eventos"""
+        print("🎮 Iniciando loop de leitura...")
+        
         while self.running:
             try:
-                # Ler eventos (timeout para permitir stop)
-                event = self.device.read_one()
-                
-                if event is None:
-                    time.sleep(0.001)
-                    continue
-                
-                # Processar evento
-                self._process_event(event)
+                # ✅ Usar read() ao invés de read_one()
+                # Isso garante leitura contínua e compatibilidade com PS5/Xbox/genéricos
+                for event in self.device.read():
+                    if not self.running:
+                        break
+                    
+                    # Processar evento
+                    self._process_event(event)
             
             except OSError:
                 print("⚠️  Device desconectado")

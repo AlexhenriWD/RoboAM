@@ -159,6 +159,11 @@ class DroneControlMode:
         if not self.enabled:
             return
         
+        # 🐛 DEBUG - verificar se callback está sendo chamado
+        # Descomentar para debug:
+        # if abs(state.left_x) > 0.05 or abs(state.left_y) > 0.05:
+        #     print(f"🎮 UPDATE: LX={state.left_x:.2f} LY={state.left_y:.2f}")
+        
         # Determinar modo de velocidade
         self._update_speed_mode(state)
         
@@ -238,6 +243,12 @@ class DroneControlMode:
     
     def _process_drive(self, state: GamepadState):
         """Processa movimento do robô"""
+        # 🔧 Heartbeat para Safety (evita watchdog timeout)
+        try:
+            self.robot.safety.heartbeat()
+        except Exception:
+            pass
+        
         # Ler sticks
         # Left Y → forward/backward (invertido porque stick pra cima = negativo)
         vx = -state.left_y * self.config.drive_sensitivity

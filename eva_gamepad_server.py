@@ -100,8 +100,8 @@ class EVAGamepadServer:
         if enable_gamepad:
             try:
                 self.gamepad = GamepadController(
-                    deadzone=0.15,
-                    smoothing=0.2,
+                    deadzone=0.05,      # ✅ Reduzido de 0.15 para 0.05
+                    smoothing=0.0,      # ✅ Desabilitado para resposta mais rápida
                     auto_detect=True
                 )
                 
@@ -389,7 +389,11 @@ class EVAGamepadServer:
         print(f"\n🤖 Robô:")
         robot_status = self.robot.get_status()
         print(f"   Modo: {robot_status['mode']}")
-        print(f"   Câmera: {robot_status['camera']['active']}")
+        
+        # Câmera (safe access)
+        cam_info = robot_status.get('camera', {})
+        cam_active = cam_info.get('active_camera', 'unknown')
+        print(f"   Câmera: {cam_active}")
         
         print("\n" + "="*60 + "\n")
 
