@@ -100,6 +100,7 @@ class EVAGamepadServer:
         if enable_gamepad:
             try:
                 self.gamepad = GamepadController(
+                    device_path="/dev/input/event5",
                     deadzone=0.05,      # ✅ Reduzido de 0.15 para 0.05
                     smoothing=0.0,      # ✅ Desabilitado para resposta mais rápida
                     auto_detect=True
