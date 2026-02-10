@@ -139,7 +139,7 @@ class GamepadController:
     # AUTO-DETECÇÃO
     # ========================================
     
-    def _auto_detect_gamepad(self):
+    def _auto_detect_gamepad(self) -> Optional[str]:
         devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
 
         for device in devices:
@@ -147,14 +147,25 @@ class GamepadController:
 
             has_keys = ecodes.EV_KEY in caps
             has_abs = ecodes.EV_ABS in caps
-            is_mouse = ecodes.EV_REL in caps  # mouse/touchpad
+            is_mouse = ecodes.EV_REL in caps  # touchpad / mouse
 
             if has_keys and has_abs and not is_mouse:
                 print(f"✅ Gamepad detectado corretamente: {device.name}")
+                print(f"   Caminho: {device.path}")
+
+                name = device.name.lower()
+                if 'dualsense' in name or 'ps5' in name:
+                    self.gamepad_type = GamepadType.PS5
+                elif 'ps4' in name:
+                    self.gamepad_type = GamepadType.PS4
+                elif 'xbox' in name:
+                    self.gamepad_type = GamepadType.XBOX_ONE
+
                 return device.path
 
-        print("⚠️ Nenhum gamepad válido encontrado")
+        print("⚠️  Nenhum gamepad válido encontrado")
         return None
+
 
     
     # ========================================
@@ -211,27 +222,21 @@ class GamepadController:
     # ========================================
     
     def _read_loop(self):
-        """Loop de leitura de eventos"""
         print("🎮 Iniciando loop de leitura...")
-        
-        while self.running:
-            try:
-                # ✅ Usar read() ao invés de read_one()
-                # Isso garante leitura contínua e compatibilidade com PS5/Xbox/genéricos
-                for event in self.device.read():
-                    if not self.running:
-                        break
-                    
-                    # Processar evento
-                    self._process_event(event)
-            
-            except OSError:
-                print("⚠️  Device desconectado")
-                break
-            
-            except Exception as e:
-                print(f"⚠️  Erro na leitura: {e}")
-                time.sleep(0.1)
+
+        try:
+            for event in self.device.read_loop():
+                if not self.running:
+                    break
+
+                self._process_event(event)
+
+        except OSError as e:
+            print(f"⚠️  Device desconectado ({e})")
+
+        except Exception as e:
+            print(f"⚠️  Erro na leitura do gamepad: {e}")
+
     
     def _process_event(self, event):
         """Processa evento do gamepad"""
