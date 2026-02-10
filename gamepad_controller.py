@@ -139,40 +139,23 @@ class GamepadController:
     # AUTO-DETECÇÃO
     # ========================================
     
-    def _auto_detect_gamepad(self) -> Optional[str]:
-        """Detecta automaticamente controle conectado"""
+    def _auto_detect_gamepad(self):
         devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
-        
-        # Keywords para identificar gamepads
-        gamepad_keywords = [
-            'controller', 'gamepad', 'joystick',
-            'xbox', 'playstation', 'ps4', 'ps5',
-            'dualshock', 'dualsense'
-        ]
-        
+
         for device in devices:
-            name_lower = device.name.lower()
-            
-            if any(kw in name_lower for kw in gamepad_keywords):
-                print(f"✅ Gamepad detectado: {device.name}")
-                print(f"   Caminho: {device.path}")
-                
-                # Detectar tipo
-                if 'ps5' in name_lower or 'dualsense' in name_lower:
-                    self.gamepad_type = GamepadType.PS5
-                elif 'ps4' in name_lower or 'dualshock 4' in name_lower:
-                    self.gamepad_type = GamepadType.PS4
-                elif 'xbox series' in name_lower:
-                    self.gamepad_type = GamepadType.XBOX_SERIES
-                elif 'xbox' in name_lower:
-                    self.gamepad_type = GamepadType.XBOX_ONE
-                
-                print(f"   Tipo: {self.gamepad_type.value}")
-                
+            caps = device.capabilities()
+
+            has_keys = ecodes.EV_KEY in caps
+            has_abs = ecodes.EV_ABS in caps
+            is_mouse = ecodes.EV_REL in caps  # mouse/touchpad
+
+            if has_keys and has_abs and not is_mouse:
+                print(f"✅ Gamepad detectado corretamente: {device.name}")
                 return device.path
-        
-        print("⚠️  Nenhum gamepad detectado")
+
+        print("⚠️ Nenhum gamepad válido encontrado")
         return None
+
     
     # ========================================
     # START / STOP
@@ -431,6 +414,7 @@ def test_gamepad():
     print("="*60 + "\n")
     
     controller = GamepadController(
+        device_path="/dev/input/event5",
         deadzone=0.15,
         smoothing=0.2,
         auto_detect=True
