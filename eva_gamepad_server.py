@@ -101,32 +101,35 @@ class EVAGamepadServer:
             try:
                 self.gamepad = GamepadController(
                     device_path="/dev/input/event5",
-                    deadzone=0.02,      # ✅ Reduzido de 0.15 para 0.05
-                    smoothing=0.0,      # ✅ Desabilitado para resposta mais rápida
+                    deadzone=0.02,
+                    smoothing=0.0,
                     auto_detect=False
                 )
-                
+
+                # ⛔ NÃO start ainda
+
+                # Criar Drone Mode PRIMEIRO
+                config = DroneControlConfig(
+                    drive_sensitivity=1.0,
+                    head_pan_sensitivity=1.0,
+                    head_tilt_sensitivity=0.8
+                )
+
+                self.drone_mode = DroneControlMode(
+                    self.robot,
+                    self.gamepad,
+                    config
+                )
+
+                # Ativar callbacks ANTES da thread
+                self.drone_mode.enable()
+
+                # 🔥 AGORA sim iniciar o gamepad
                 if self.gamepad.start():
-                    # Criar modo drone
-                    config = DroneControlConfig(
-                        drive_sensitivity=1.0,
-                        head_pan_sensitivity=1.0,
-                        head_tilt_sensitivity=0.8
-                    )
-                    
-                    self.drone_mode = DroneControlMode(
-                        self.robot,
-                        self.gamepad,
-                        config
-                    )
-                    
-                    # Ativar
-                    self.drone_mode.enable()
-                    
                     print("✅ Gamepad conectado e modo drone ativo")
                 else:
-                    print("⚠️  Gamepad não detectado (continuando sem)")
-                    self.gamepad = None
+                    print("⚠️  Gamepad não detectado")
+
             
             except Exception as e:
                 print(f"⚠️  Erro ao iniciar gamepad: {e}")

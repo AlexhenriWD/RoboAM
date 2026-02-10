@@ -176,6 +176,8 @@ class DroneControlMode:
         
         # Processar cabeça
         self._process_head(state)
+        print("🔥 CALLBACK CHEGOU", state.left_x, state.left_y)
+
     
     def _on_button_press(self, button: str):
         """Callback para botões pressionados"""
