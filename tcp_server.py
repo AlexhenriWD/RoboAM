@@ -2,6 +2,7 @@ import socket
 import select
 import threading
 import queue
+import time
 
 
 class TCPServer:
@@ -141,7 +142,20 @@ class TCPServer:
                                     msg = data.decode("utf-8")
                                 except UnicodeDecodeError:
                                     continue
-                                self.message_queue.put((addr, msg))
+                                # Timestamp aqui, no recv() de verdade --
+                                # não em quem consome a fila depois. É
+                                # isso que dá pra medir "quanto tempo a
+                                # mensagem ficou esperando" com o relógio
+                                # de uma máquina só (o servidor), sem
+                                # depender do relógio de quem mandou (ver
+                                # robot_protocol.CommandEnvelope.is_expired).
+                                # Terceiro elemento da tupla é NOVO --
+                                # qualquer consumidor antigo que
+                                # desempacotava só (addr, msg) quebra;
+                                # ver eva_server.py (legado, sendo
+                                # substituído por eva_command_server.py,
+                                # que já espera 3 elementos).
+                                self.message_queue.put((addr, msg, time.time()))
                         else:
                             self._remove_client(s)
 

@@ -14,9 +14,14 @@ O QUE MUDA EM RELAÇÃO A eva_server.py:
   como prioridade numérica -- humano sempre corta EVA, sem negociação).
 - "stop" e "estop" NUNCA são bloqueados por arbitragem, de nenhuma fonte
   -- parar tem que sempre ser possível.
-- ttl_ms é respeitado de verdade (CommandEnvelope.is_expired) -- um
-  comando que demorou demais pra chegar (EVA travada pensando, rede
-  lenta) é descartado em vez de executado tarde.
+- ttl_ms é respeitado de verdade (CommandEnvelope.is_expired) -- medido
+  inteiramente pelo relógio do SERVIDOR (do recv() na rede até o
+  processamento), nunca comparando com o relógio de quem mandou. Isso
+  não é a implementação original: a primeira versão comparava com
+  sent_ts do CLIENTE, e em uso real (PC da EVA + Raspberry Pi, relógios
+  não sincronizados no nível de milissegundos) isso fazia TODO comando
+  expirar instantaneamente, mesmo com a rede respondendo na hora -- ver
+  histórico em robot_protocol.CommandEnvelope.is_expired.
 - Todo comando de movimento aceito alimenta o watchdog
   (safety.heartbeat()) -- mas não é só isso que alimenta: ver
   eva_robot.py e robot_tools.py (lado EVA) para o heartbeat contínuo
@@ -57,7 +62,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from server import Server
 from eva_robot import EVARobot, RobotMode
-from robot_protocol import CommandEnvelope, parse_command, now_s, as_float
+from robot_protocol import CommandEnvelope, parse_command, as_float
 
 
 MANUAL_OVERRIDE_WINDOW_S = float(os.environ.get("EVA_ROBOT_MANUAL_WINDOW_S", "2.0"))
@@ -155,8 +160,11 @@ class EVACommandServer:
                     time.sleep(0.01)
                     continue
 
-                client_address, mensagem = fila.get()
-                resposta = self._processar_mensagem(mensagem)
+                # 3 elementos: tcp_server.py agora carimba o horário de
+                # chegada de verdade (na rede, no recv()), não só quando
+                # este loop processa -- ver robot_protocol.is_expired.
+                client_address, mensagem, chegou_em = fila.get()
+                resposta = self._processar_mensagem(mensagem, chegou_em)
                 self.server.send_data_to_command_client(
                     json.dumps(resposta, ensure_ascii=False) + "\n",
                     client_address,
@@ -195,7 +203,7 @@ class EVACommandServer:
     # PROCESSAMENTO DE COMANDO
     # ========================================
 
-    def _processar_mensagem(self, bruto: str) -> dict:
+    def _processar_mensagem(self, bruto: str, chegou_em: float) -> dict:
         bruto = (bruto or "").strip()
         if not bruto:
             return {"ok": False, "erro": "mensagem_vazia"}
@@ -206,7 +214,7 @@ class EVACommandServer:
             return {"ok": False, "erro": "json_invalido", "detalhe": bruto[:150]}
 
         env: CommandEnvelope = parse_command(msg)
-        recebido_em = now_s()
+        recebido_em = chegou_em
 
         if env.is_expired(recebido_em):
             return {"ok": False, "erro": "comando_expirado", "seq": env.seq}
