@@ -27,6 +27,21 @@ MUDANÇAS NESTA VERSÃO (integração com a EVA):
   safety.py --main-- e no main.py legado, que usa outra estrutura de
   pastas e não é o caminho ativo hoje) -- ou seja, o watchdog nunca
   disparava de verdade em produção.
+- NOVO GAP ENCONTRADO E FECHADO: nada no caminho ativo (este arquivo,
+  eva_gamepad_server.py, eva_server.py) chamava safety.update_sensor_data()
+  com leitura real de sensor. safety.validate_drive_command() lê
+  self.last_sensor_data.get('ultrasonic_cm')/'battery_v' -- com
+  last_sensor_data sempre vazio ({}), os dois `if ... is not None` da
+  validação nunca entravam, e a checagem de obstáculo/bateria SEMPRE
+  devolvia "OK" independente da distância real ou da bateria real. Ou
+  seja: a validação que acabei de ligar em todo movimento existia, mas
+  era inerte -- não tinha dado pra checar. Agora existe uma thread de
+  sensores (_sensor_loop, iniciada junto com o watchdog em start()) que
+  lê ultrassônico sempre, e bateria via ADC quando ele estiver disponível
+  (self.adc é None com aviso no console se ADC() falhar ao inicializar --
+  mesma filosofia de degradação graciosa do resto do projeto). Fórmula de
+  bateria idêntica à já usada em car.py (`read_adc(2) * divisor do PCB`),
+  não inventei conta nova.
 - estop()/reset_estop()/heartbeat(): atalhos finos sobre safety.py, pra
   quem fala com o robô de fora (eva_command_server.py) não precisar
   saber que safety existe como atributo interno.
@@ -41,7 +56,7 @@ from typing import Optional
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from robot_core import Servo, Ordinary_Car, Ultrasonic
+from robot_core import Servo, Ordinary_Car, Ultrasonic, ADC
 from camera_manager import CameraManager, CameraType
 from arm_controller import ArmController
 from robot_state import STATE
@@ -64,6 +79,18 @@ class EVARobot:
         self.motor = Ordinary_Car()
         self.ultrasonic = Ultrasonic()
 
+        # ADC (bateria) -- opcional, mesma filosofia de degradação
+        # graciosa do resto do projeto (câmera, TTS, etc). Sem ele, o
+        # sensor loop simplesmente nunca alimenta 'battery_v', e a
+        # checagem de bateria em safety.py fica sempre "sem leitura" em
+        # vez de "OK" falso -- ver docstring do módulo.
+        self.adc: Optional[ADC] = None
+        try:
+            self.adc = ADC()
+        except Exception as e:
+            print(f"⚠️ ADC (bateria) não disponível: {e} -- "
+                  f"checagem de bateria não vai ter leitura real")
+
         # Subsistemas
         self.arm = ArmController(self.servo)
         self.camera_manager = CameraManager(
@@ -83,6 +110,7 @@ class EVARobot:
         self.mode = RobotMode.IDLE
         self.running = False
         self._watchdog_thread: Optional[threading.Thread] = None
+        self._sensor_thread: Optional[threading.Thread] = None
 
         # Inversão de motores (ajuste se necessário)
         self.invert_left = -1
@@ -110,6 +138,13 @@ class EVARobot:
         )
         self._watchdog_thread.start()
 
+        # Ver docstring do módulo -- sem isso, validate_drive_command
+        # nunca tinha leitura real pra checar.
+        self._sensor_thread = threading.Thread(
+            target=self._sensor_loop, daemon=True, name="eva-robot-sensors"
+        )
+        self._sensor_thread.start()
+
         return True
 
     def stop(self):
@@ -123,6 +158,11 @@ class EVARobot:
             self.camera_manager.stop()
         except Exception:
             pass
+        if self.adc is not None:
+            try:
+                self.adc.close_i2c()
+            except Exception:
+                pass
 
     def _watchdog_loop(self):
         """Checa o watchdog a cada 0.5s -- bem abaixo de
@@ -135,6 +175,38 @@ class EVARobot:
             except Exception as e:
                 print(f"⚠️ erro no watchdog loop: {e}")
             time.sleep(0.5)
+
+    def _sensor_loop(self):
+        """Lê ultrassônico sempre, e bateria via ADC quando disponível,
+        alimentando safety.update_sensor_data() -- é isso que dá dado
+        real pra validate_drive_command() checar. Frequência de
+        CONFIG.sensors.SENSOR_READ_INTERVAL (0.1s/10Hz por padrão).
+        Erro de leitura pontual (sensor solto, I2C ocupado) não derruba a
+        thread -- só pula aquela leitura e tenta de novo no próximo ciclo,
+        mesma política do resto do projeto."""
+        intervalo = CONFIG.sensors.SENSOR_READ_INTERVAL
+        while self.running:
+            try:
+                leituras = {}
+
+                try:
+                    leituras["ultrasonic_cm"] = self.ultrasonic.get_distance()
+                except Exception:
+                    pass  # sensor solto/timeout momentâneo -- só não atualiza esta leitura
+
+                if self.adc is not None:
+                    try:
+                        divisor = 3 if self.adc.pcb_version == 1 else 2
+                        leituras["battery_v"] = round(self.adc.read_adc(2) * divisor, 2)
+                    except Exception:
+                        pass
+
+                if leituras:
+                    self.safety.update_sensor_data(leituras)
+
+            except Exception as e:
+                print(f"⚠️ erro no sensor loop: {e}")
+            time.sleep(intervalo)
 
     # ------------------ Segurança (atalhos) ------------------
     def estop(self, motivo: str = "comando remoto"):
