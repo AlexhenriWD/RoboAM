@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional, Literal
 import time
 
 Source = Literal["manual", "eva", "script", "unknown"]
-Cmd = Literal["drive", "head", "stop", "estop", "heartbeat", "get_state"]
+Cmd = Literal["drive", "head", "stop", "estop", "reset_estop", "heartbeat", "get_state"]
 
 def now_s() -> float:
     return time.time()

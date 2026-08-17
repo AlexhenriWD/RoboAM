@@ -111,6 +111,9 @@ class EVARobot:
         self.running = False
         self._watchdog_thread: Optional[threading.Thread] = None
         self._sensor_thread: Optional[threading.Thread] = None
+        # Ver heartbeat()/_watchdog_loop -- watchdog só passa a exigir
+        # heartbeat regular DEPOIS que o primeiro chegou de verdade.
+        self._recebeu_primeiro_heartbeat = False
 
         # Inversão de motores (ajuste se necessário)
         self.invert_left = -1
@@ -168,10 +171,24 @@ class EVARobot:
         """Checa o watchdog a cada 0.5s -- bem abaixo de
         CONFIG.safety.WATCHDOG_TIMEOUT (5s padrão), pra não perder a
         janela. Roda enquanto self.running for True; para sozinho junto
-        com stop()."""
+        com stop().
+
+        SÓ CHECA DE VERDADE DEPOIS DO PRIMEIRO HEARTBEAT (achado em uso
+        real): Watchdog.__init__ (safety.py) já marca last_heartbeat no
+        instante da criação, e nada alimenta o watchdog até um cliente
+        de verdade conectar e mandar comando/heartbeat -- que só
+        acontece depois que o servidor já está de pé e alguém chamou uma
+        ferramenta de robô pela primeira vez (ver robot_tools.py,
+        _iniciar_thread_robo). Sem essa checagem, todo start()
+        disparava emergency stop sozinho ~5s depois de subir, mesmo com
+        tudo funcionando, só porque ninguém tinha conectado ainda --
+        "ninguém conectou ainda" e "perdeu conexão no meio do
+        movimento" são situações diferentes; só a segunda é o que o
+        watchdog existe pra proteger contra."""
         while self.running:
             try:
-                self.safety.watchdog.check()
+                if self._recebeu_primeiro_heartbeat:
+                    self.safety.watchdog.check()
             except Exception as e:
                 print(f"⚠️ erro no watchdog loop: {e}")
             time.sleep(0.5)
@@ -221,8 +238,15 @@ class EVARobot:
 
     def heartbeat(self):
         """Alimenta o watchdog. Chamar regularmente enquanto alguém
-        (humano ou EVA) estiver de fato supervisionando o robô."""
+        (humano ou EVA) estiver de fato supervisionando o robô.
+
+        Também marca que o primeiro heartbeat de verdade já chegou --
+        ver _watchdog_loop: antes do primeiro heartbeat, o watchdog não
+        pune "ninguém conectou ainda" como se fosse "perdeu conexão no
+        meio do movimento". São situações diferentes; só a segunda é o
+        que o watchdog existe pra proteger contra."""
         self.safety.heartbeat()
+        self._recebeu_primeiro_heartbeat = True
 
     # ------------------ Motores (discretos) ------------------
     def _apply_inv(self, fl, bl, fr, br):

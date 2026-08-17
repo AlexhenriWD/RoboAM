@@ -221,6 +221,11 @@ class EVACommandServer:
             self.robot.estop(motivo)
             return {"ok": True, "cmd": "estop", "seq": env.seq}
 
+        if env.cmd == "reset_estop":
+            ok = self.robot.reset_estop()
+            return {"ok": ok, "cmd": "reset_estop", "seq": env.seq,
+                    "detalhe": None if ok else "ainda não é seguro resetar (ver bateria/obstáculo)"}
+
         if env.cmd == "stop":
             self.robot.stop_motors()
             return {"ok": True, "cmd": "stop", "seq": env.seq}
@@ -309,14 +314,17 @@ def main():
             print("❌ Falha ao iniciar servidor")
             return 1
 
-        print("💡 'q' + Enter para sair\n")
+        print("💡 Rodando. Ctrl+C para sair.\n")
+        # NÃO usar input() aqui -- descoberto em uso real: se o stdin
+        # não estiver anexado como terminal interativo de verdade
+        # (depende de como o processo foi lançado), input() bate EOF
+        # NA HORA, o loop antigo saía sem avisar, e o processo inteiro
+        # morria segundos depois de subir -- sem Ctrl+C, sem 'q', sem
+        # nenhum log explicando por quê. time.sleep() não depende de
+        # stdin nenhum; Ctrl+C (KeyboardInterrupt) continua funcionando
+        # do mesmo jeito pra parar de propósito.
         while True:
-            try:
-                cmd = input().strip().lower()
-                if cmd == 'q':
-                    break
-            except EOFError:
-                break
+            time.sleep(1)
 
     except KeyboardInterrupt:
         print("\n⚠️  Interrompido pelo usuário")
