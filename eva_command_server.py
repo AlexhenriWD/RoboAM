@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""
+EVA ROBOT - COMMAND SERVER
+Substitui eva_server.py como o ponto de entrada de rede pra comandos.
+
+O QUE MUDA EM RELAÇÃO A eva_server.py:
+- Protocolo passa de string CSV ("CMD_FORWARD,1500") para JSON, um
+  objeto por linha, no formato de robot_protocol.CommandEnvelope (que já
+  existia no projeto pronto pra isso -- source/priority/seq/ttl_ms/cmd/
+  params -- mas não estava ligado em lugar nenhum).
+- Todo comando de movimento ("drive"/"head") passa por arbitragem por
+  fonte: se um comando "manual" chegou nos últimos MANUAL_OVERRIDE_WINDOW_S
+  segundos, qualquer comando "eva" de movimento é recusado (não hackeado
+  como prioridade numérica -- humano sempre corta EVA, sem negociação).
+- "stop" e "estop" NUNCA são bloqueados por arbitragem, de nenhuma fonte
+  -- parar tem que sempre ser possível.
+- ttl_ms é respeitado de verdade (CommandEnvelope.is_expired) -- um
+  comando que demorou demais pra chegar (EVA travada pensando, rede
+  lenta) é descartado em vez de executado tarde.
+- Todo comando de movimento aceito alimenta o watchdog
+  (safety.heartbeat()) -- mas não é só isso que alimenta: ver
+  eva_robot.py e robot_tools.py (lado EVA) para o heartbeat contínuo
+  independente de movimento.
+- speed_scale de comandos "drive" vindos de source="eva" é limitado a
+  EVA_ROBOT_MAX_SPEED_SCALE (0.6 por padrão) mesmo que o cliente peça
+  mais -- teto de autoridade conservador por padrão, ajustável.
+
+LIMITAÇÃO CONHECIDA (não resolvida nesta rodada): o transporte
+(server.py/tcp_server.py) lê até 1024 bytes por recv() e trata como UMA
+mensagem -- não tem framing de verdade para múltiplas mensagens no mesmo
+pacote TCP nem mensagens maiores que isso. Pro uso atual (um comando por
+send(), como já era com o protocolo CSV) isso é suficiente, mas não é
+robusto contra fragmentação/coalescência de pacotes sob carga. Se isso
+virar problema real (comandos perdidos ou concatenados), o próximo passo
+é dar a tcp_server.py um framing de verdade (delimitador \\n com buffer
+por conexão), não inventar outro workaround aqui.
+
+CONFLITO CONHECIDO (decisão pendente, não resolvida nesta rodada):
+eva_gamepad_server.py instancia seu PRÓPRIO EVARobot (seu próprio
+SafetyController, seu próprio acesso a I2C/PWM). Rodar este servidor E
+o eva_gamepad_server.py ao mesmo tempo significa DOIS processos escrevendo
+no mesmo hardware sem coordenação nenhuma entre si -- isso é perigoso,
+não só logicamente incorreto. Por ora: rode só UM dos dois de cada vez.
+Unificar os dois numa arbitragem de verdade (gamepad como source="manual"
+dentro deste mesmo processo) é o passo natural seguinte.
+"""
+
+import json
+import os
+import struct
+import sys
+import threading
+import time
+from typing import Optional
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from server import Server
+from eva_robot import EVARobot, RobotMode
+from robot_protocol import CommandEnvelope, parse_command, now_s, as_float
+
+
+MANUAL_OVERRIDE_WINDOW_S = float(os.environ.get("EVA_ROBOT_MANUAL_WINDOW_S", "2.0"))
+EVA_MAX_SPEED_SCALE = float(os.environ.get("EVA_ROBOT_MAX_SPEED_SCALE", "0.6"))
+DEFAULT_DRIVE_TTL_MS = int(os.environ.get("EVA_ROBOT_DEFAULT_DRIVE_TTL_MS", "500"))
+
+
+class EVACommandServer:
+    """Servidor de comando + telemetria de vídeo. Dono único do
+    EVARobot -- todo comando de movimento passa por aqui."""
+
+    def __init__(self):
+        self.server = Server()
+        self.robot: Optional[EVARobot] = None
+
+        self.is_running = False
+        self.stop_event = threading.Event()
+
+        self.command_thread: Optional[threading.Thread] = None
+        self.video_thread: Optional[threading.Thread] = None
+
+        # Arbitragem: timestamp do último comando de MOVIMENTO com
+        # source="manual" aceito. Comando "eva" de movimento é recusado
+        # se estivermos dentro da janela desde esse timestamp.
+        self._last_manual_ts = 0.0
+
+        print("✅ EVACommandServer inicializado")
+
+    # ========================================
+    # START / STOP
+    # ========================================
+
+    def start(self, command_port: int = 5000, video_port: int = 8000) -> bool:
+        print(f"\n🚀 Iniciando EVA Command Server nas portas {command_port}/{video_port}...\n")
+
+        self.robot = EVARobot()
+        if not self.robot.start():
+            print("⚠️  Robô iniciado em modo limitado")
+
+        try:
+            self.server.start_tcp_servers(
+                command_port=command_port,
+                video_port=video_port,
+                # max_clients=2 no comando: dá espaço pra um cliente "eva"
+                # e um cliente "manual" (ex: painel de override) ao mesmo
+                # tempo. Vídeo continua 1 -- não faz sentido dois
+                # consumidores de stream disputando a mesma câmera.
+                max_clients=2,
+                listen_count=2,
+            )
+            print(f"✅ Servidor TCP iniciado em {self.server.ip_address}:{command_port} "
+                  f"(vídeo: {video_port})")
+        except Exception as e:
+            print(f"❌ Erro ao iniciar servidor TCP: {e}")
+            return False
+
+        self.is_running = True
+        self.stop_event.clear()
+
+        self.command_thread = threading.Thread(target=self._command_loop, daemon=True)
+        self.command_thread.start()
+
+        self.video_thread = threading.Thread(target=self._video_loop, daemon=True)
+        self.video_thread.start()
+
+        print("✅ EVA Command Server pronto\n")
+        return True
+
+    def stop(self):
+        print("\n🛑 Parando EVA Command Server...")
+        self.is_running = False
+        self.stop_event.set()
+
+        if self.command_thread:
+            self.command_thread.join(timeout=2.0)
+        if self.video_thread:
+            self.video_thread.join(timeout=2.0)
+
+        self.server.stop_tcp_servers()
+
+        if self.robot:
+            self.robot.stop()
+
+        print("✅ EVA Command Server finalizado")
+
+    # ========================================
+    # LOOPS
+    # ========================================
+
+    def _command_loop(self):
+        fila = self.server.read_data_from_command_server()
+        while not self.stop_event.is_set() and self.is_running:
+            try:
+                if fila.qsize() == 0:
+                    time.sleep(0.01)
+                    continue
+
+                client_address, mensagem = fila.get()
+                resposta = self._processar_mensagem(mensagem)
+                self.server.send_data_to_command_client(
+                    json.dumps(resposta, ensure_ascii=False) + "\n",
+                    client_address,
+                )
+            except Exception as e:
+                print(f"⚠️ Erro no command loop: {e}")
+                time.sleep(0.05)
+
+    def _video_loop(self):
+        while not self.stop_event.is_set() and self.is_running:
+            try:
+                if not self.server.is_video_server_connected():
+                    time.sleep(0.1)
+                    continue
+
+                if self.robot.camera_manager.switching:
+                    time.sleep(0.02)
+                    continue
+
+                frame_data = self.robot.get_camera_frame_encoded(quality=70)
+                if frame_data is None or len(frame_data) < 100:
+                    time.sleep(0.02)
+                    continue
+
+                packet = struct.pack('<L', len(frame_data)) + frame_data
+                self.server.send_data_to_video_client(packet)
+                time.sleep(1 / 15)
+
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                time.sleep(0.2)
+            except Exception as e:
+                print(f"⚠️ Erro no vídeo: {e}")
+                time.sleep(0.1)
+
+    # ========================================
+    # PROCESSAMENTO DE COMANDO
+    # ========================================
+
+    def _processar_mensagem(self, bruto: str) -> dict:
+        bruto = (bruto or "").strip()
+        if not bruto:
+            return {"ok": False, "erro": "mensagem_vazia"}
+
+        try:
+            msg = json.loads(bruto)
+        except json.JSONDecodeError:
+            return {"ok": False, "erro": "json_invalido", "detalhe": bruto[:150]}
+
+        env: CommandEnvelope = parse_command(msg)
+        recebido_em = now_s()
+
+        if env.is_expired(recebido_em):
+            return {"ok": False, "erro": "comando_expirado", "seq": env.seq}
+
+        if env.source == "manual" and env.cmd in ("drive", "head", "stop"):
+            self._last_manual_ts = recebido_em
+
+        # stop/estop nunca são bloqueados por arbitragem -- de qualquer
+        # fonte, sempre passam.
+        if env.cmd == "estop":
+            motivo = (env.params or {}).get("motivo", f"estop remoto (source={env.source})")
+            self.robot.estop(motivo)
+            return {"ok": True, "cmd": "estop", "seq": env.seq}
+
+        if env.cmd == "stop":
+            self.robot.stop_motors()
+            return {"ok": True, "cmd": "stop", "seq": env.seq}
+
+        if env.cmd == "heartbeat":
+            self.robot.heartbeat()
+            return {"ok": True, "cmd": "heartbeat", "seq": env.seq}
+
+        if env.cmd == "get_state":
+            return {"ok": True, "cmd": "get_state", "seq": env.seq,
+                    "estado": self.robot.get_status()}
+
+        # a partir daqui: comandos que MOVEM -- sujeitos a arbitragem
+        if env.source == "eva" and (recebido_em - self._last_manual_ts) < MANUAL_OVERRIDE_WINDOW_S:
+            return {"ok": False, "erro": "manual_ativo", "seq": env.seq,
+                    "detalhe": f"controle manual ativo há menos de {MANUAL_OVERRIDE_WINDOW_S:.0f}s"}
+
+        if env.cmd == "drive":
+            return self._cmd_drive(env, recebido_em)
+
+        if env.cmd == "head":
+            return self._cmd_head(env)
+
+        return {"ok": False, "erro": "comando_desconhecido", "cmd": env.cmd, "seq": env.seq}
+
+    def _cmd_drive(self, env: CommandEnvelope, recebido_em: float) -> dict:
+        p = env.params or {}
+        vx = as_float(p.get("vx", 0.0))
+        vy = as_float(p.get("vy", 0.0))
+        vz = as_float(p.get("vz", 0.0))
+        speed_scale = as_float(p.get("speed_scale", EVA_MAX_SPEED_SCALE))
+
+        # Teto de autoridade conservador por padrão para comandos "eva" --
+        # mesmo que o cliente peça mais, não passa disso aqui.
+        if env.source == "eva":
+            speed_scale = min(speed_scale, EVA_MAX_SPEED_SCALE)
+
+        ok, motivo = self.robot.drive_vector(vx, vy, vz, speed_scale=speed_scale)
+
+        # Qualquer comando de movimento ACEITO conta como sinal de vida
+        # -- alimenta o watchdog. Se foi recusado pela segurança, não
+        # alimenta (não faz sentido "provar que está vivo" com um
+        # comando que a própria segurança rejeitou).
+        if ok:
+            self.robot.heartbeat()
+
+        return {"ok": ok, "cmd": "drive", "seq": env.seq, "detalhe": motivo}
+
+    def _cmd_head(self, env: CommandEnvelope) -> dict:
+        p = env.params or {}
+        smooth = bool(p.get("smooth", False))
+        resultados = []
+
+        if "yaw" in p and p["yaw"] is not None:
+            ok = self.robot.arm_set_angle(0, int(as_float(p["yaw"])), smooth=smooth)
+            resultados.append({"servo": "yaw", "ok": bool(ok)})
+
+        if "pitch" in p and p["pitch"] is not None:
+            ok = self.robot.arm_set_angle(1, int(as_float(p["pitch"])), smooth=smooth)
+            resultados.append({"servo": "pitch", "ok": bool(ok)})
+
+        if not resultados:
+            return {"ok": False, "erro": "sem_parametros", "cmd": "head", "seq": env.seq,
+                    "detalhe": "informe yaw e/ou pitch"}
+
+        if all(r["ok"] for r in resultados):
+            self.robot.heartbeat()
+
+        return {"ok": all(r["ok"] for r in resultados), "cmd": "head",
+                "seq": env.seq, "resultados": resultados}
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+def main():
+    print("\n" + "=" * 60)
+    print("🤖 EVA ROBOT - COMMAND SERVER")
+    print("=" * 60 + "\n")
+
+    servidor = EVACommandServer()
+
+    try:
+        if not servidor.start(command_port=5000, video_port=8000):
+            print("❌ Falha ao iniciar servidor")
+            return 1
+
+        print("💡 'q' + Enter para sair\n")
+        while True:
+            try:
+                cmd = input().strip().lower()
+                if cmd == 'q':
+                    break
+            except EOFError:
+                break
+
+    except KeyboardInterrupt:
+        print("\n⚠️  Interrompido pelo usuário")
+
+    finally:
+        servidor.stop()
+        print("\n✅ Programa finalizado")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
