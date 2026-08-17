@@ -395,5 +395,23 @@ class EVARobot:
             "mode": self.mode.value,
             "camera": self.camera_manager.get_status(),
             "arm": self.arm.get_status(),
-            "safety": self.safety.get_status(),
+            "safety": self._status_seguranca_com_watchdog_honesto(),
         }
+
+    def _status_seguranca_com_watchdog_honesto(self) -> dict:
+        """safety.get_status() (safety.py) chama watchdog.check(), que
+        conta a partir da CRIAÇÃO do Watchdog -- não do primeiro
+        heartbeat real (mesma causa raiz documentada em _watchdog_loop).
+        Isso é inofensivo pra ação (o loop já não pune isso), mas sem
+        esse ajuste aqui, todo get_state()/painel mostrava
+        'watchdog_ok: false' logo depois do servidor subir, mesmo com
+        tudo certo, só porque ninguém tinha conectado ainda -- alarme
+        falso visual, não de comportamento. Corrige só a LEITURA: antes
+        do primeiro heartbeat, reporta 'sem heartbeat ainda' em vez de
+        'watchdog não ok', que são coisas diferentes pra quem está
+        olhando o painel decidir se é seguro prosseguir."""
+        status = self.safety.get_status()
+        if not self._recebeu_primeiro_heartbeat:
+            status["watchdog_ok"] = True
+            status["watchdog_motivo"] = "sem heartbeat ainda (nenhum cliente conectou de verdade)"
+        return status
