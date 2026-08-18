@@ -70,13 +70,61 @@ class CameraManager:
     # -------------------------
     # utils detect
     # -------------------------
-    def _detect_opencv_devices(self, max_index: int = 6) -> List[int]:
+
+    # Palavras que aparecem no nome do driver/dispositivo dos nós de
+    # vídeo criados pela stack da PiCam (libcamera) -- unicam é a
+    # captura crua do sensor, bcm2835-isp/rp1-cfe são estágios de
+    # processamento de imagem, todos aparecem como /dev/videoN mas
+    # NENHUM deles é uma webcam USB, mesmo que cv2.VideoCapture consiga
+    # abri-los (isOpened()=True) -- eles só entregam frame utilizável
+    # através do pipeline libcamera/Picamera2, não por cap.read() cru.
+    _NOMES_PICAM = ("unicam", "bcm2835", "rp1-cfe", "rp1 cfe", "csi",
+                     "pispbe", "rpi-isp", "raspberrypi-isp")
+
+    def _nome_dispositivo_video(self, index: int) -> str:
+        """Lê o nome do dispositivo V4L2 via sysfs, sem abrir o device
+        (só leitura de arquivo texto, barato e não interfere em nada
+        que já esteja usando a câmera)."""
+        try:
+            with open(f"/sys/class/video4linux/video{index}/name", "r") as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+
+    def _eh_provavel_picam(self, nome: str) -> bool:
+        nome_lower = nome.lower()
+        return any(chave in nome_lower for chave in self._NOMES_PICAM)
+
+    def _detect_opencv_devices(self, max_index: int = 64) -> List[int]:
+        """ACHADO EM USO REAL: max_index era 6, mas a stack de câmera do
+        Raspberry Pi (libcamera/unicam/rp1-cfe/bcm2835-isp) cria DEZENAS
+        de nós /dev/videoN pra uma PiCam SÓ (metadados, saída de ISP,
+        etc -- 'ls /dev/video*' num teste real mostrou video0 até
+        video31). Varrer só 0-5 significa que uma webcam USB de
+        verdade, se estiver num índice mais alto (bem provável com
+        tantos nós de PiCam ocupando os baixos), nunca era sequer
+        testada -- o código achava "sucesso" no primeiro nó de PiCam
+        que abrisse via cv2.VideoCapture (que aceita abrir mesmo sendo
+        um nó cru que não entrega frame do jeito que este código
+        espera) e parava de procurar ali, mesmo com a webcam de
+        verdade existindo em outro índice nunca alcançado.
+
+        Agora varre um range bem mais largo E filtra por nome do driver
+        via sysfs (sem precisar abrir o device pra isso) -- nós que
+        parecem ser da PiCam são pulados de propósito, mesmo que
+        "abram" com sucesso."""
         found = []
         for i in range(max_index):
+            nome = self._nome_dispositivo_video(i)
+            if nome and self._eh_provavel_picam(nome):
+                continue  # nó da PiCam -- não é candidato a webcam USB, nem tenta abrir
+
             cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
             ok = cap.isOpened()
             cap.release()
             if ok:
+                rotulo = f" ({nome})" if nome else " (nome indisponível via sysfs)"
+                print(f"   candidato a webcam USB: /dev/video{i}{rotulo}")
                 found.append(i)
         return found
 
@@ -251,6 +299,7 @@ class CameraManager:
         if camera_type == self.active_camera_type:
             return
 
+        tipo_anterior = self.active_camera_type
         print(f"🔁 Alternando câmera para {camera_type.value.upper()}")
         self.switching = True
         try:
@@ -261,29 +310,62 @@ class CameraManager:
 
                 time.sleep(0.2)
 
+                sucesso = False
                 if camera_type == CameraType.PICAM:
                     # preferir Picamera2
-                    if not self._open_picam2():
+                    if self._open_picam2():
+                        sucesso = True
+                    else:
                         # fallback: tenta opencv em índices disponíveis
                         devs = self._detect_opencv_devices()
-                        ok = False
                         for d in devs:
                             if self._open_opencv(d):
-                                ok = True
+                                sucesso = True
+                                camera_type = CameraType.USB  # fallback mudou o tipo de verdade
+                                self.usb_id = d
                                 break
-                        if not ok:
-                            print("❌ Falha ao abrir PICAM (e sem fallback)")
-                            return
                 else:
                     # USB via OpenCV: garante id válido
                     devs = self._detect_opencv_devices()
                     if self.usb_id not in devs and devs:
                         self.usb_id = devs[0]
-                    if not self._open_opencv(self.usb_id):
-                        print(f"❌ Falha ao abrir USB (device {self.usb_id})")
-                        return
+                    sucesso = self._open_opencv(self.usb_id)
 
-                self.active_camera_type = camera_type
+                if sucesso:
+                    self.active_camera_type = camera_type
+                    return
+
+                # RECUPERAÇÃO -- ACHADO EM USO REAL: sem isso, uma troca
+                # que falhasse deixava as DUAS câmeras fechadas (a nova
+                # nunca abriu, e a antiga tinha acabado de ser fechada
+                # de propósito alguns milissegundos antes por este
+                # mesmo método), com active_camera_type ainda apontando
+                # pro tipo ANTIGO -- rótulo dizendo "picam" mas nenhuma
+                # câmera de verdade aberta, _capture_loop girando pra
+                # sempre sem frame nenhum, e nenhuma tentativa de voltar
+                # pro que estava funcionando antes da troca ter sido
+                # tentada. Agora tenta reabrir explicitamente o que
+                # funcionava, em vez de só desistir.
+                print(f"❌ Falha ao abrir {camera_type.value.upper()} -- "
+                      f"tentando voltar para {tipo_anterior.value.upper()}...")
+
+                recuperou = False
+                if tipo_anterior == CameraType.PICAM:
+                    recuperou = self._open_picam2()
+                else:
+                    devs = self._detect_opencv_devices()
+                    if self.usb_id not in devs and devs:
+                        self.usb_id = devs[0]
+                    recuperou = self._open_opencv(self.usb_id)
+
+                if recuperou:
+                    self.active_camera_type = tipo_anterior
+                    print(f"✅ Voltou para {tipo_anterior.value.upper()} com sucesso")
+                else:
+                    print(f"❌ Não consegui nem voltar para {tipo_anterior.value.upper()} -- "
+                          f"sem nenhuma câmera ativa agora. active_camera_type continua "
+                          f"'{self.active_camera_type.value}' só como rótulo -- não reflete "
+                          f"nenhum device de verdade aberto neste momento.")
 
         finally:
             self.switching = False
