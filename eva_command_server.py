@@ -183,9 +183,12 @@ class EVACommandServer:
                 time.sleep(0.05)
 
     def _video_loop(self):
+        falhas_consecutivas = 0
+        ultimo_log_falha = 0.0
         while not self.stop_event.is_set() and self.is_running:
             try:
                 if not self.server.is_video_server_connected():
+                    falhas_consecutivas = 0
                     time.sleep(0.1)
                     continue
 
@@ -195,9 +198,24 @@ class EVACommandServer:
 
                 frame_data = self.robot.get_camera_frame_encoded(quality=70)
                 if frame_data is None or len(frame_data) < 100:
+                    falhas_consecutivas += 1
+                    agora = time.time()
+                    # Log com throttle (a cada 5s, não a cada tentativa) --
+                    # achado em uso real: sem isso, quando a câmera parava
+                    # de produzir frame por qualquer motivo, este loop
+                    # ficava mudo pra sempre (só sleep+continue) -- o
+                    # único sintoma visível era do OUTRO lado (cliente de
+                    # vídeo reconectando sem parar), nunca a causa.
+                    if agora - ultimo_log_falha > 5.0:
+                        cm = self.robot.camera_manager
+                        print(f"⚠️  vídeo sem frame há {falhas_consecutivas} tentativas -- "
+                              f"active={cm.active_camera_type.value} switching={cm.switching} "
+                              f"cap_aberto={cm.cap is not None} picam2_iniciado={cm.picam2_started}")
+                        ultimo_log_falha = agora
                     time.sleep(0.02)
                     continue
 
+                falhas_consecutivas = 0
                 packet = struct.pack('<L', len(frame_data)) + frame_data
                 self.server.send_data_to_video_client(packet)
                 time.sleep(1 / 15)

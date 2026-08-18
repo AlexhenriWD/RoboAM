@@ -90,15 +90,14 @@ class TCPServer:
         """
         while not self.stop_event.is_set():
             try:
-                # ⚠️ seletor DIFERENTE dependendo do modo
-                if self.read_enabled:
-                    read_list = (
-                        [self.server_socket, self.stop_pipe_r]
-                        + list(self.client_sockets.keys())
-                    )
-                else:
-                    # 🔒 vídeo: NUNCA ler sockets de cliente
-                    read_list = [self.server_socket, self.stop_pipe_r]
+                # ⚠️ seletor DIFERENTE dependendo do modo, mas os DOIS
+                # incluem os sockets de cliente agora -- ver abaixo o
+                # motivo de o modo vídeo (read_enabled=False) precisar
+                # disso mesmo nunca processando dado nenhum de cliente.
+                read_list = (
+                    [self.server_socket, self.stop_pipe_r]
+                    + list(self.client_sockets.keys())
+                )
 
                 readable, _, _ = select.select(read_list, [], [], 0.5)
 
@@ -128,9 +127,38 @@ class TCPServer:
                         break
 
                     # --------------------------
-                    # leitura (APENAS comandos)
+                    # leitura
                     # --------------------------
                     if not self.read_enabled:
+                        # Modo vídeo: NUNCA processa dado de cliente (o
+                        # protocolo é write-only por desenho), mas ainda
+                        # assim faz o recv() só pra DETECTAR desconexão
+                        # (recv devolvendo vazio = cliente fechou).
+                        #
+                        # CORRIGIDO (achado em uso real): antes, o modo
+                        # vídeo excluía client_sockets do select()
+                        # inteiro -- e como escrita só acontece quando há
+                        # frame pra mandar (send_data_to_video_client,
+                        # chamado de _video_loop), se a câmera parasse de
+                        # produzir frame por qualquer motivo, o servidor
+                        # NUNCA tentava escrever pros clientes de vídeo,
+                        # NUNCA descobria que um cliente antigo tinha
+                        # desconectado (FIN), e portanto NUNCA chamava
+                        # _remove_client -- cada reconexão de um cliente
+                        # (ex: ver_camera_robo.py tentando de novo depois
+                        # de timeout) empilhava mais uma conexão morta,
+                        # até estourar max_clients pra sempre, mesmo com
+                        # bem menos clientes de vídeo reais do que isso.
+                        try:
+                            data = s.recv(1024)
+                            if not data:
+                                self._remove_client(s)
+                            # dado não-vazio: cliente de vídeo mandou algo
+                            # (não deveria, protocolo é write-only) --
+                            # descarta, não é motivo pra derrubar a
+                            # conexão por si só.
+                        except OSError:
+                            self._remove_client(s)
                         continue
 
                     try:
