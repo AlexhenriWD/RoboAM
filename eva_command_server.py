@@ -107,12 +107,20 @@ class EVACommandServer:
             self.server.start_tcp_servers(
                 command_port=command_port,
                 video_port=video_port,
-                # max_clients=2 no comando: dá espaço pra um cliente "eva"
-                # e um cliente "manual" (ex: painel de override) ao mesmo
-                # tempo. Vídeo continua 1 -- não faz sentido dois
-                # consumidores de stream disputando a mesma câmera.
-                max_clients=2,
-                listen_count=2,
+                # max_clients=6 no comando -- dá espaço confortável pra
+                # várias ferramentas ao mesmo tempo: EVA (robot_tools.py,
+                # 1 conexão), controle_manual_robo.py (1 conexão
+                # compartilhada entre teclado/heartbeat/monitor),
+                # ver_camera_robo.py (1 conexão pra consultar estado),
+                # testar_robo.py ocasional, com folga. Achado em uso
+                # real: com max_clients=2 (valor original), só o
+                # controle_manual_robo.py sozinho já enchia as duas vagas
+                # (principal + heartbeat, antes de virarem uma conexão
+                # compartilhada -- ver controle_manual_robo.py), e
+                # qualquer ferramenta extra tentando conectar entrava em
+                # loop de "Rejected (max clients)" pra sempre.
+                max_clients=6,
+                listen_count=6,
             )
             print(f"✅ Servidor TCP iniciado em {self.server.ip_address}:{command_port} "
                   f"(vídeo: {video_port})")
