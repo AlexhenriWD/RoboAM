@@ -8,6 +8,7 @@ EVA ROBOT - CAMERA MANAGER (USB via OpenCV, PiCam via Picamera2 se disponível)
 
 import time
 import threading
+import os
 from enum import Enum
 from typing import Optional, List, Tuple
 
@@ -115,6 +116,17 @@ class CameraManager:
         "abram" com sucesso."""
         found = []
         for i in range(max_index):
+            # Checa se o arquivo de device existe ANTES de pedir pro
+            # OpenCV tentar abrir -- achado em uso real: sem isso, cada
+            # índice que não existe no sistema (a maioria, num range de
+            # 64) gera duas linhas de warning do próprio OpenCV pro
+            # stderr ("can't open camera by index"), inundando o log
+            # sem nenhum ganho -- a gente já sabe que não existe só
+            # olhando o sistema de arquivos, muito mais barato que
+            # deixar o OpenCV descobrir e reclamar.
+            if not os.path.exists(f"/dev/video{i}"):
+                continue
+
             nome = self._nome_dispositivo_video(i)
             if nome and self._eh_provavel_picam(nome):
                 continue  # nó da PiCam -- não é candidato a webcam USB, nem tenta abrir
