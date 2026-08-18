@@ -231,8 +231,9 @@ class EVACommandServer:
 
         if env.cmd == "reset_estop":
             ok = self.robot.reset_estop()
+            motivo = None if ok else "ainda não é seguro resetar (ver bateria/obstáculo)"
             return {"ok": ok, "cmd": "reset_estop", "seq": env.seq,
-                    "detalhe": None if ok else "ainda não é seguro resetar (ver bateria/obstáculo)"}
+                    "erro": motivo, "detalhe": motivo}
 
         if env.cmd == "stop":
             self.robot.stop_motors()
@@ -280,7 +281,15 @@ class EVACommandServer:
         if ok:
             self.robot.heartbeat()
 
-        return {"ok": ok, "cmd": "drive", "seq": env.seq, "detalhe": motivo}
+        # "erro" além de "detalhe" -- ANTES só tinha "detalhe", e
+        # qualquer código do lado do cliente que checasse "erro" primeiro
+        # (convenção do resto do projeto, ver registry.py) não
+        # encontrava nada e tratava como resposta desconhecida, mesmo
+        # com o motivo real disponível em "detalhe" o tempo todo (achado
+        # em uso real: controle_manual_robo.py mostrava "resposta
+        # inesperada" para uma recusa perfeitamente normal).
+        return {"ok": ok, "cmd": "drive", "seq": env.seq,
+                "erro": None if ok else motivo, "detalhe": motivo}
 
     def _cmd_head(self, env: CommandEnvelope) -> dict:
         p = env.params or {}
