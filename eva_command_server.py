@@ -62,6 +62,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from server import Server
 from eva_robot import EVARobot, RobotMode
+from camera_manager import CameraType
 from robot_protocol import CommandEnvelope, parse_command, as_float
 
 
@@ -246,6 +247,30 @@ class EVACommandServer:
         if env.cmd == "get_state":
             return {"ok": True, "cmd": "get_state", "seq": env.seq,
                     "estado": self.robot.get_status()}
+
+        if env.cmd == "camera_switch":
+            # Não é comando de movimento -- não passa pela arbitragem
+            # manual/eva (trocar câmera não move nada fisicamente, não
+            # há razão pra bloquear mesmo com controle manual ativo ou
+            # emergency stop em curso -- pode ser útil olhar em volta
+            # justamente durante um estop).
+            p = env.params or {}
+            tipo = (p.get("tipo") or "").strip().lower()
+            camera_type = None  # None = alterna (ver EVARobot.switch_camera)
+            if tipo == "usb":
+                camera_type = CameraType.USB
+            elif tipo == "picam":
+                camera_type = CameraType.PICAM
+            elif tipo:
+                return {"ok": False, "erro": "tipo_invalido", "cmd": "camera_switch",
+                        "seq": env.seq, "detalhe": "use 'usb', 'picam', ou omita pra alternar"}
+            try:
+                self.robot.switch_camera(camera_type)
+                ativa = self.robot.camera_manager.get_active_camera_type().value
+                return {"ok": True, "cmd": "camera_switch", "seq": env.seq, "camera_ativa": ativa}
+            except Exception as e:
+                return {"ok": False, "erro": "falha_troca_camera", "cmd": "camera_switch",
+                        "seq": env.seq, "detalhe": str(e)[:150]}
 
         # a partir daqui: comandos que MOVEM -- sujeitos a arbitragem
         if env.source == "eva" and (recebido_em - self._last_manual_ts) < MANUAL_OVERRIDE_WINDOW_S:
