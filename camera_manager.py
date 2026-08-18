@@ -86,15 +86,59 @@ class CameraManager:
             cap.release()
             return False
 
+        # MJPG explícito -- ACHADO EM USO REAL: sem isso, alguns
+        # webcams USB (comum em V4L2) aceitam abrir (isOpened()=True) e
+        # aceitam os cap.set() de resolução/fps sem erro, mas o
+        # cap.read() nunca traz frame de verdade -- o driver não
+        # consegue negociar o formato bruto (YUYV) na resolução pedida,
+        # mas MJPG geralmente funciona na mesma resolução porque é
+        # comprimido pela própria câmera antes de sair pela USB. Setar
+        # isto ANTES de largura/altura/fps porque em alguns drivers a
+        # ordem importa (fourcc primeiro, depois negociar resolução
+        # dentro daquele formato).
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         cap.set(cv2.CAP_PROP_FPS, self.fps)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        # warmup
-        for _ in range(3):
-            cap.read()
-            time.sleep(0.02)
+        # Aquecimento que CHECA de verdade se leu frame -- ANTES, os 3
+        # cap.read() de aquecimento não checavam o retorno (ok, frame),
+        # então um device que abre mas nunca entrega frame passava pelo
+        # aquecimento "com sucesso" e só ia falhar de verdade minutos
+        # depois, silenciosamente, dentro de _capture_loop -- sem log
+        # nenhum explicando por quê (ver eva_command_server._video_loop,
+        # que precisou ganhar diagnóstico à parte só pra expor esse
+        # sintoma do lado de fora). Agora, se o aquecimento falhar com
+        # MJPG, tenta de novo SEM fourcc forçado (alguns drivers só
+        # aceitam o formato bruto padrão) antes de desistir.
+        aqueceu = False
+        for tentativa in range(5):
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                aqueceu = True
+                break
+            time.sleep(0.05)
+
+        if not aqueceu:
+            print(f"⚠️  Câmera USB (device {device_id}) abriu mas não entregou frame "
+                  f"com MJPG -- tentando sem fourcc forçado...")
+            cap.set(cv2.CAP_PROP_FOURCC, 0)  # remove força de fourcc, deixa driver escolher
+            for tentativa in range(5):
+                ok, frame = cap.read()
+                if ok and frame is not None:
+                    aqueceu = True
+                    break
+                time.sleep(0.05)
+
+        if not aqueceu:
+            print(f"❌ Câmera USB (device {device_id}) abriu mas cap.read() nunca "
+                  f"trouxe frame em nenhum dos dois formatos -- provavelmente resolução "
+                  f"{self.width}x{self.height}@{self.fps}fps não suportada por este "
+                  f"dispositivo, ou outro processo já está usando a câmera.")
+            cap.release()
+            return False
 
         self.cap = cap
         return True
@@ -249,6 +293,8 @@ class CameraManager:
     # -------------------------
     def _capture_loop(self):
         interval = 1.0 / float(self.fps)
+        falhas_consecutivas = 0
+        ultimo_log_falha = 0.0
 
         while self.running:
             if self.switching:
@@ -272,6 +318,7 @@ class CameraManager:
                             frame = f
 
             if frame is not None:
+                falhas_consecutivas = 0
                 if self.active_camera_type == CameraType.PICAM and self.rotate_picam:
                     frame = cv2.rotate(frame, self.picam_rotation)
 
@@ -281,6 +328,21 @@ class CameraManager:
                 with self.frame_lock:
                     self.frame = frame
                     self.last_good_frame = frame
+            else:
+                # Log com throttle -- diagnóstico mais próximo da causa
+                # que o de eva_command_server._video_loop (aquele só vê
+                # "sem frame pra codificar", este mostra se é o
+                # cap.read() em si que está falhando -- útil se o
+                # problema for intermitente, câmera funciona um tempo e
+                # para no meio, em vez de nunca funcionar desde o início
+                # (esse segundo caso já é pego no aquecimento de
+                # _open_opencv, que agora checa de verdade).
+                falhas_consecutivas += 1
+                agora = time.time()
+                if agora - ultimo_log_falha > 5.0:
+                    print(f"⚠️  _capture_loop sem frame há {falhas_consecutivas} ciclos "
+                          f"(câmera ativa: {self.active_camera_type.value})")
+                    ultimo_log_falha = agora
 
             time.sleep(interval)
 
