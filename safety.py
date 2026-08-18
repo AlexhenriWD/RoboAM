@@ -322,8 +322,20 @@ class SafetyController:
     def trigger_emergency_stop(self, reason: str):
         """
         Aciona parada de emergência
-        
-        Para TODOS os motores imediatamente
+
+        Para os MOTORES imediatamente -- não desliga o robô inteiro.
+
+        CORRIGIDO (achado em uso real): chamava self.robot.stop() --
+        EVARobot.stop() inteiro, que desliga a câmera e zera
+        self.running, o que por sua vez matava as threads de watchdog e
+        sensor (que checam `while self.running`). Resultado: depois de
+        QUALQUER emergency stop, o robô ficava com câmera morta e
+        monitoramento morto pra sempre, e reset_emergency_stop() (que só
+        desliga a flag) não desfazia nada disso -- só reiniciar o
+        processo resolvia. A própria existência de reset_emergency_stop()
+        já indica que a intenção sempre foi "pausa recuperável", não
+        "desligar tudo" -- trocar por stop_motors() (só motor) é o que
+        faz reset_emergency_stop() significar o que o nome diz.
         """
         if self.emergency_stop_active:
             return  # Já ativo
@@ -331,11 +343,13 @@ class SafetyController:
         self.emergency_stop_active = True
         self.safety_level = SafetyLevel.EMERGENCY
         
-        # Parar robô
+        # Parar motores -- NÃO o robô inteiro (câmera/threads continuam
+        # vivas, é isso que torna reset_emergency_stop() de fato
+        # reversível sem reiniciar o processo).
         try:
-            self.robot.stop()
+            self.robot.stop_motors()
         except Exception as e:
-            print(f"❌ Erro ao parar robô: {e}")
+            print(f"❌ Erro ao parar motores: {e}")
         
         # Log
         self.add_warning(
@@ -496,8 +510,8 @@ if __name__ == "__main__":
     
     # Mock robot
     class MockRobot:
-        def stop(self):
-            print("🛑 Robot stopped")
+        def stop_motors(self):
+            print("🛑 Motores parados")
     
     robot = MockRobot()
     safety = SafetyController(robot)

@@ -288,22 +288,32 @@ class EVACommandServer:
         resultados = []
 
         if "yaw" in p and p["yaw"] is not None:
-            ok = self.robot.arm_set_angle(0, int(as_float(p["yaw"])), smooth=smooth)
-            resultados.append({"servo": "yaw", "ok": bool(ok)})
+            ok, motivo = self.robot.arm_set_angle(0, int(as_float(p["yaw"])), smooth=smooth)
+            resultados.append({"servo": "yaw", "ok": bool(ok), "detalhe": motivo})
 
         if "pitch" in p and p["pitch"] is not None:
-            ok = self.robot.arm_set_angle(1, int(as_float(p["pitch"])), smooth=smooth)
-            resultados.append({"servo": "pitch", "ok": bool(ok)})
+            ok, motivo = self.robot.arm_set_angle(1, int(as_float(p["pitch"])), smooth=smooth)
+            resultados.append({"servo": "pitch", "ok": bool(ok), "detalhe": motivo})
 
         if not resultados:
             return {"ok": False, "erro": "sem_parametros", "cmd": "head", "seq": env.seq,
                     "detalhe": "informe yaw e/ou pitch"}
 
-        if all(r["ok"] for r in resultados):
+        todos_ok = all(r["ok"] for r in resultados)
+        if todos_ok:
             self.robot.heartbeat()
 
-        return {"ok": all(r["ok"] for r in resultados), "cmd": "head",
-                "seq": env.seq, "resultados": resultados}
+        # top-level erro/detalhe -- pega o motivo do primeiro resultado
+        # que falhou. Achado em uso real: sem isso, _desembrulhar() (do
+        # lado da EVA, em robot_tools.py) não tinha onde ler o motivo e
+        # caía em 'falha_desconhecida'/null, mesmo com o servidor já
+        # sabendo exatamente por que recusou (ver arm_set_angle).
+        motivo_falha = next((r["detalhe"] for r in resultados if not r["ok"]), "falha_desconhecida")
+
+        return {"ok": todos_ok, "cmd": "head", "seq": env.seq,
+                "resultados": resultados,
+                "erro": None if todos_ok else motivo_falha,
+                "detalhe": "ok" if todos_ok else motivo_falha}
 
 
 # ============================================================================

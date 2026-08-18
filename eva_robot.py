@@ -360,15 +360,24 @@ class EVARobot:
         return True, "ok"
 
     # ------------------ Servos ------------------
-    def arm_set_angle(self, channel: int, angle: int, smooth=False):
+    def arm_set_angle(self, channel: int, angle: int, smooth=False) -> "tuple[bool, str]":
+        """Devolve (ok, motivo) -- ANTES devolvia só bool, descartando o
+        motivo que safety.validate_servo_command() já calculava (ex:
+        'EMERGENCY STOP ativo', 'Cotovelo em posição crítica...', 'Fora
+        do limite físico'). Achado em uso real: sem o motivo, qualquer
+        robo_olhar recusado chegava em robot_tools.py como
+        'falha_desconhecida'/detalhe=null -- tecnicamente correto (foi
+        mesmo recusado), mas inútil pra saber POR QUÊ sem ir direto no
+        log do servidor."""
         ok, reason = self.safety.validate_servo_command(channel, angle)
         if not ok:
-            return False
+            return False, reason
 
         moved = self.arm.set_angle(channel, angle, smooth=smooth)
         if moved:
             STATE.set_servo(channel, int(angle))
-        return moved
+            return True, "ok"
+        return False, "arm.set_angle recusou (canal inválido ou falha de hardware)"
 
     def arm_look_left(self, deg=30): return self.arm.look_left(deg)
     def arm_look_right(self, deg=30): return self.arm.look_right(deg)
