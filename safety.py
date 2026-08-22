@@ -289,12 +289,11 @@ class SafetyController:
             voltage = sensor_data['battery_v']
             
             if voltage < CONFIG.safety.CRITICAL_BATTERY_VOLTAGE:
-                self.add_warning(
-                    SafetyLevel.CRITICAL,
-                    f"Bateria crítica: {voltage:.1f}V",
-                    sensor="battery",
-                    value=voltage
-                )
+                # CORRIGIDO: antes só logava (add_warning) -- o robô podia
+                # continuar andando com bateria crítica até o próximo
+                # comando `drive` ser validado. Agora para de verdade,
+                # assim que a leitura chega, sem esperar comando nenhum.
+                self.trigger_emergency_stop(f"Bateria crítica: {voltage:.1f}V")
             elif voltage < CONFIG.safety.LOW_BATTERY_VOLTAGE:
                 self.add_warning(
                     SafetyLevel.WARNING,
@@ -308,9 +307,23 @@ class SafetyController:
             distance = sensor_data['ultrasonic_cm']
             
             if distance < CONFIG.safety.EMERGENCY_STOP_DISTANCE:
+                # CORRIGIDO (bug real visto em teste ao vivo): antes só
+                # logava CRITICAL aqui -- quem realmente parava o robô
+                # era validate_drive_command(), e só no instante exato de
+                # um comando `drive` chegar. Com o robô já em movimento
+                # (TTL do comando anterior ainda rodando) e nenhum
+                # comando novo chegando entre um tick de sensor e outro,
+                # ele seguia andando na direção do obstáculo já detectado
+                # como crítico, esperando esse próximo comando -- ou,
+                # como aconteceu, esperando alguém apertar o estop manual
+                # no dashboard. Agora o monitoramento contínuo (chamado a
+                # cada CONFIG.sensors.SENSOR_READ_INTERVAL, não só a cada
+                # comando) para de verdade assim que vê a leitura crítica.
+                self.trigger_emergency_stop(f"Obstáculo crítico: {distance:.1f}cm")
+            elif distance < CONFIG.safety.MIN_OBSTACLE_DISTANCE:
                 self.add_warning(
-                    SafetyLevel.CRITICAL,
-                    f"Obstáculo muito próximo: {distance:.1f}cm",
+                    SafetyLevel.WARNING,
+                    f"Obstáculo detectado: {distance:.1f}cm",
                     sensor="ultrasonic",
                     value=distance
                 )
