@@ -207,63 +207,60 @@ class SafetyController:
         # ===============================
         # LIMITES FÍSICOS ABSOLUTOS
         # ===============================
+        # yaw e cabeça têm exceções condicionais tratadas abaixo, à
+        # parte, porque dependem do estado de outros canais -- não dá
+        # pra expressar isso numa tabela plana de min/max.
         physical_limits = {
-            0: (0, 180),    # yaw / base
+            0: (0, 90),     # yaw / base -- NÃO vai até 180, testado e confirmado
             1: (40, 110),   # pitch / ombro
             2: (90, 180),   # cotovelo
-            3: (0, 117),    # cabeça
+            3: (0, 117),    # cabeça -- baseline; ver regra 2 abaixo (relaxa com pitch baixo)
         }
 
         if channel not in physical_limits:
             return False, "Canal de servo inválido"
-
-        min_a, max_a = physical_limits[channel]
-        if not (min_a <= angle <= max_a):
-            return False, f"Fora do limite físico ({min_a}°–{max_a}°)"
 
         # ===============================
         # ESTADO ATUAL DO BRAÇO
         # ===============================
         try:
             arm = self.robot.arm.current_angles
-            yaw = arm.get(0, 90)
-            pitch = arm.get(1, 90)
             elbow = arm.get(2, 90)
-            head = arm.get(3, 90)
+            pitch = arm.get(1, 90)
         except Exception:
             # Falha ao ler estado → não movimenta
             return False, "Estado do braço indisponível"
 
         # ===============================
-        # REGRAS ESPECIAIS (SEUS TESTES)
+        # REGRAS ESPECIAIS (calibração real)
         # ===============================
 
-        # 1️⃣ Cotovelo em posição crítica
-        if elbow >= 160:
-            # Só pode mexer o próprio cotovelo
-            if channel != 2:
-                return False, "Cotovelo em posição crítica – outros eixos travados"
+        # 1) Cotovelo em posição crítica (>=160°): trava TODOS os
+        # outros eixos, sem exceção -- política explícita, não é um
+        # teto de ângulo isolado por canal. Precisa vir ANTES de
+        # qualquer outra regra condicional (yaw, cabeça), senão elas
+        # nunca são alcançadas quando o cotovelo está crítico.
+        if elbow >= 160 and channel != 2:
+            return False, "Cotovelo em posição crítica -- outros eixos travados"
 
-            # Pitch limitado quando cotovelo alto
-            if channel == 1 and angle > 104:
-                return False, "Pitch limitado pelo cotovelo (máx 104°)"
-
-        # 2️⃣ Yaw limitado quando cotovelo alto
-        if elbow >= 160 and channel == 0:
-            if angle > 90:
-                return False, "Yaw limitado a 90° com cotovelo alto"
-
-        # 3️⃣ Cabeça depende do pitch
+        # 2) Cabeça (canal 3): teto normal 117°, mas com pitch baixo
+        # (<=50°) há curso livre a mais -- até 180°. Tem que checar
+        # ANTES do teto físico geral da tabela acima, senão o teto de
+        # 117 já barra antes da relaxação valer.
         if channel == 3:
-            # Cabeça só pode ir até 117
-            if angle > 117:
-                return False, "Cabeça acima do limite seguro"
+            teto = 180 if pitch <= 50 else 117
+            if not (0 <= angle <= teto):
+                motivo = (f"Cabeça fora do limite ({teto}° com pitch <= 50°)"
+                          if pitch <= 50 else "Cabeça acima do limite seguro (117°)")
+                return False, motivo
+            return True, "OK"
 
-            # Pitch muito baixo restringe cabeça
-            if pitch in (40, 50):
-                # Apenas faixa segura
-                if not (0 <= angle <= 180):
-                    return False, "Cabeça limitada por pitch baixo"
+        # ===============================
+        # LIMITE FÍSICO DO CANAL (yaw / pitch / cotovelo)
+        # ===============================
+        min_a, max_a = physical_limits[channel]
+        if not (min_a <= angle <= max_a):
+            return False, f"Fora do limite físico ({min_a}°–{max_a}°)"
 
         # ===============================
         # SE PASSOU POR TUDO → SEGURO

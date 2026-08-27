@@ -69,6 +69,10 @@ from robot_protocol import CommandEnvelope, parse_command, as_float
 MANUAL_OVERRIDE_WINDOW_S = float(os.environ.get("EVA_ROBOT_MANUAL_WINDOW_S", "2.0"))
 EVA_MAX_SPEED_SCALE = float(os.environ.get("EVA_ROBOT_MAX_SPEED_SCALE", "0.6"))
 DEFAULT_DRIVE_TTL_MS = int(os.environ.get("EVA_ROBOT_DEFAULT_DRIVE_TTL_MS", "500"))
+# Duração do "pulso" de movimento da EVA antes de parar sozinho -- ver
+# _agendar_autostop_eva(). Chute conservador de partida; ajuste depois de
+# observar em uso real (mesma filosofia do resto do projeto).
+EVA_DRIVE_AUTOSTOP_S = float(os.environ.get("EVA_ROBOT_DRIVE_AUTOSTOP_S", "1.0"))
 
 
 class EVACommandServer:
@@ -89,6 +93,11 @@ class EVACommandServer:
         # source="manual" aceito. Comando "eva" de movimento é recusado
         # se estivermos dentro da janela desde esse timestamp.
         self._last_manual_ts = 0.0
+
+        # Auto-stop pra comandos "drive" vindos da EVA -- ver
+        # _agendar_autostop_eva() pra motivo completo. Reagendado a cada
+        # novo comando drive da EVA; cancelado se ela mandar stop/estop.
+        self._eva_drive_autostop_timer: Optional[threading.Timer] = None
 
         print("✅ EVACommandServer inicializado")
 
@@ -253,6 +262,7 @@ class EVACommandServer:
         # fonte, sempre passam.
         if env.cmd == "estop":
             motivo = (env.params or {}).get("motivo", f"estop remoto (source={env.source})")
+            self._cancelar_autostop_eva()
             self.robot.estop(motivo)
             return {"ok": True, "cmd": "estop", "seq": env.seq}
 
@@ -263,6 +273,7 @@ class EVACommandServer:
                     "erro": motivo, "detalhe": motivo}
 
         if env.cmd == "stop":
+            self._cancelar_autostop_eva()
             self.robot.stop_motors()
             return {"ok": True, "cmd": "stop", "seq": env.seq}
 
@@ -311,6 +322,30 @@ class EVACommandServer:
 
         return {"ok": False, "erro": "comando_desconhecido", "cmd": env.cmd, "seq": env.seq}
 
+    def _agendar_autostop_eva(self):
+        """Movimento vindo da EVA para sozinho depois de EVA_DRIVE_AUTOSTOP_S
+        segundos, a menos que outro comando 'drive' da EVA chegue antes e
+        reagende. Ver docstring de _cmd_drive acima pra motivo completo."""
+        self._cancelar_autostop_eva()
+        timer = threading.Timer(EVA_DRIVE_AUTOSTOP_S, self._autostop_disparou)
+        timer.daemon = True
+        self._eva_drive_autostop_timer = timer
+        timer.start()
+
+    def _cancelar_autostop_eva(self):
+        if self._eva_drive_autostop_timer is not None:
+            self._eva_drive_autostop_timer.cancel()
+            self._eva_drive_autostop_timer = None
+
+    def _autostop_disparou(self):
+        # Não usa self.robot.stop_motors() bruto porque isso não atualiza
+        # STATE nem loga -- robot.stop_motors() (EVARobot) já faz os dois.
+        try:
+            self.robot.stop_motors()
+            print(f"⏱️  Auto-stop: {EVA_DRIVE_AUTOSTOP_S:.1f}s sem novo comando drive da EVA")
+        except Exception as e:
+            print(f"⚠️ Erro no auto-stop: {e}")
+
     def _cmd_drive(self, env: CommandEnvelope, recebido_em: float) -> dict:
         p = env.params or {}
         vx = as_float(p.get("vx", 0.0))
@@ -331,6 +366,8 @@ class EVACommandServer:
         # comando que a própria segurança rejeitou).
         if ok:
             self.robot.heartbeat()
+            if env.source == "eva":
+                self._agendar_autostop_eva()
 
         # "erro" além de "detalhe" -- ANTES só tinha "detalhe", e
         # qualquer código do lado do cliente que checasse "erro" primeiro
@@ -339,8 +376,17 @@ class EVACommandServer:
         # com o motivo real disponível em "detalhe" o tempo todo (achado
         # em uso real: controle_manual_robo.py mostrava "resposta
         # inesperada" para uma recusa perfeitamente normal).
+        #
+        # distancia_obstaculo_cm: vem de graça em TODA chamada de drive,
+        # não só quando pedido via robo_estado -- achado em uso real: a
+        # única forma de saber a distância era chamar robo_estado, e a
+        # ferramenta só instrui fazer isso DEPOIS de um erro, nunca antes
+        # de decidir se mover. Sem isso ela literalmente não tinha como
+        # saber o quão perto de algo estava até já ter sido recusada (ou
+        # pior, até bater, se o comando anterior ainda estava valendo).
         return {"ok": ok, "cmd": "drive", "seq": env.seq,
-                "erro": None if ok else motivo, "detalhe": motivo}
+                "erro": None if ok else motivo, "detalhe": motivo,
+                "distancia_obstaculo_cm": self.robot.safety.last_sensor_data.get("ultrasonic_cm")}
 
     def _cmd_head(self, env: CommandEnvelope) -> dict:
         p = env.params or {}
@@ -355,9 +401,17 @@ class EVACommandServer:
             ok, motivo = self.robot.arm_set_angle(1, int(as_float(p["pitch"])), smooth=smooth)
             resultados.append({"servo": "pitch", "ok": bool(ok), "detalhe": motivo})
 
+        # Canal 3 -- cabeça (montagem da PiCam), diferente de yaw/pitch
+        # (que são o pan/tilt do braço todo). Não tinha NENHUM comando de
+        # rede apontando pra ele até agora -- arm_set_angle()/safety.py já
+        # aceitavam o canal, só nada no dispatcher chamava.
+        if "cabeca" in p and p["cabeca"] is not None:
+            ok, motivo = self.robot.arm_set_angle(3, int(as_float(p["cabeca"])), smooth=smooth)
+            resultados.append({"servo": "cabeca", "ok": bool(ok), "detalhe": motivo})
+
         if not resultados:
             return {"ok": False, "erro": "sem_parametros", "cmd": "head", "seq": env.seq,
-                    "detalhe": "informe yaw e/ou pitch"}
+                    "detalhe": "informe yaw, pitch e/ou cabeca"}
 
         todos_ok = all(r["ok"] for r in resultados)
         if todos_ok:

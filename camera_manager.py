@@ -314,6 +314,9 @@ class CameraManager:
         tipo_anterior = self.active_camera_type
         print(f"🔁 Alternando câmera para {camera_type.value.upper()}")
         self.switching = True
+        with self.frame_lock:
+            self.frame = None
+            self.last_good_frame = None
         try:
             with self.cap_lock:
                 # fecha tudo antes de abrir

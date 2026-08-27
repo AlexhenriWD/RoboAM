@@ -246,7 +246,7 @@ class PredefinedPoses:
     
     LOOK_DOWN = {
         0: 90,   # Yaw
-        1: 140,  # Pitch
+        1: 110,  # Pitch -- teto físico real confirmado (era 140, inválido)
         2: 120,  # Cotovelo
     }
     

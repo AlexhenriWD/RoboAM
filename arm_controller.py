@@ -21,17 +21,35 @@ class ArmController:
             3: 90,  # Cabeça
         }
 
-        # Limites (ajuste se precisar)
+        # Limites físicos REAIS -- devem ser idênticos a
+        # safety.SafetyController.validate_servo_command.physical_limits.
+        # As duas cópias existem porque safety.py valida o caminho da EVA
+        # e este dict é a última linha de defesa do caminho manual/gamepad
+        # (drone_control_mode.py chama arm.set_angle() direto, sem passar
+        # por safety nenhuma vez) -- mas o VALOR tem que ser o mesmo dos
+        # dois lados. Se recalibrar um, recalibra o outro.
         self.limits: Dict[int, Tuple[int, int]] = {
-            0: (0, 180),
-            1: (0, 180),
-            2: (0, 180),
-            3: (0, 180),
+            0: (0, 90),    # yaw / base -- confirmado, NÃO vai até 180
+            1: (40, 110),  # pitch / ombro -- confirmado fisicamente
+            2: (90, 180),  # cotovelo
+            3: (0, 117),   # cabeça -- baseline conservador; safety.py relaxa
+                           # até 180 quando pitch<=50, este clamp não (ver nota)
         }
 
         self.smooth_step = 2
 
         print("🦾 ArmController (0..3) inicializado")
+
+    def _limite_canal(self, channel: int) -> Tuple[int, int]:
+        """safety.validate_servo_command (regra 2) libera a cabeça até
+        180° quando o pitch está <= 50°. Este clamp não sabia disso e
+        cortava calado em 117 -- safety APROVAVA 150°, set_angle
+        devolvia True, o servidor respondia ok, e do lado da EVA parecia
+        que a cabeça tinha ido pra onde ela pediu."""
+        lo, hi = self.limits[channel]
+        if channel == 3 and self.current_angles.get(1, 90) <= 50:
+            hi = 180
+        return lo, hi
 
     def move_to_home(self):
         for ch in (0, 1, 2, 3):
@@ -43,7 +61,7 @@ class ArmController:
             print(f"⚠️ Canal inválido: {channel}")
             return False
 
-        lo, hi = self.limits[channel]
+        lo, hi = self._limite_canal(channel)
         angle = max(lo, min(hi, int(angle)))
 
         current = self.current_angles.get(channel, 90)

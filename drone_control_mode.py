@@ -361,9 +361,9 @@ class DroneControlMode:
         """Cabeça para baixo (chão)"""
         print("⬇️  Preset: Down")
         self.target_head_yaw = 90
-        self.target_head_pitch = 140
+        self.target_head_pitch = 110  # teto físico real (era 140, inválido)
         self.robot.arm.set_angle(0, 90, smooth=True)
-        self.robot.arm.set_angle(1, 140, smooth=True)
+        self.robot.arm.set_angle(1, 110, smooth=True)
     
     def _head_preset_left(self):
         """Cabeça para esquerda"""
