@@ -37,6 +37,7 @@ class ArmController:
         }
 
         self.smooth_step = 2
+        self.ultimo_motivo = "ok"
 
         print("🦾 ArmController (0..3) inicializado")
 
@@ -66,6 +67,7 @@ class ArmController:
 
         current = self.current_angles.get(channel, 90)
         if abs(angle - current) < 2:
+            self.ultimo_motivo = "já estava nessa posição"
             return True
 
         if smooth:
@@ -77,8 +79,10 @@ class ArmController:
             # robot_core.Servo espera channel como string ('0'..)
             self.servo.set_servo_pwm(str(channel), angle)
             self.current_angles[channel] = angle
+            self.ultimo_motivo = "ok"
             return True
         except Exception as e:
+            self.ultimo_motivo = f"falha de hardware: {e}"
             print(f"❌ Erro servo {channel}: {e}")
             return False
 

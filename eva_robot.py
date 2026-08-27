@@ -376,7 +376,7 @@ class EVARobot:
         moved = self.arm.set_angle(channel, angle, smooth=smooth)
         if moved:
             STATE.set_servo(channel, int(angle))
-            return True, "ok"
+            return True, getattr(self.arm, "ultimo_motivo", "ok")
         return False, "arm.set_angle recusou (canal inválido ou falha de hardware)"
 
     def arm_look_left(self, deg=30): return self.arm.look_left(deg)
