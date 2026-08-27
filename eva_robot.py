@@ -376,6 +376,12 @@ class EVARobot:
         moved = self.arm.set_angle(channel, angle, smooth=smooth)
         if moved:
             STATE.set_servo(channel, int(angle))
+            # Motivo vindo do ArmController, não um "ok" fixo: ele
+            # distingue "movi" de "já estava nessa posição" e de "pedido
+            # cortado pelo limite". Sem isso, quatro comandos seguidos que
+            # não moveram um grau respondiam "ok" idêntico a quatro
+            # comandos bem-sucedidos, e não havia como notar a diferença
+            # nem do CLI nem do lado da EVA.
             return True, getattr(self.arm, "ultimo_motivo", "ok")
         return False, "arm.set_angle recusou (canal inválido ou falha de hardware)"
 

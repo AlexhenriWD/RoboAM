@@ -409,9 +409,21 @@ class EVACommandServer:
             ok, motivo = self.robot.arm_set_angle(3, int(as_float(p["cabeca"])), smooth=smooth)
             resultados.append({"servo": "cabeca", "ok": bool(ok), "detalhe": motivo})
 
+        # Canal 2 -- cotovelo. NÃO é exposto como parâmetro livre do lado
+        # da EVA (ver robot_tools.robo_olhar, que omite este eixo de
+        # propósito): o cotovelo acima de 160° trava todos os outros eixos
+        # por segurança (safety.validate_servo_command, regra 1), então
+        # dar o controle dele ao modelo é dar um jeito de ela se paralisar
+        # sozinha. O caminho existe aqui porque ela precisa de UMA saída
+        # com destino fixo quando o braço é deixado travado pelo gamepad
+        # -- robo_destravar_braco, que manda sempre o mesmo ângulo.
+        if "cotovelo" in p and p["cotovelo"] is not None:
+            ok, motivo = self.robot.arm_set_angle(2, int(as_float(p["cotovelo"])), smooth=smooth)
+            resultados.append({"servo": "cotovelo", "ok": bool(ok), "detalhe": motivo})
+
         if not resultados:
             return {"ok": False, "erro": "sem_parametros", "cmd": "head", "seq": env.seq,
-                    "detalhe": "informe yaw, pitch e/ou cabeca"}
+                    "detalhe": "informe yaw, pitch, cabeca e/ou cotovelo"}
 
         todos_ok = all(r["ok"] for r in resultados)
         if todos_ok:

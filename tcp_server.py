@@ -25,6 +25,10 @@ class TCPServer:
 
         self.read_enabled = True  # definido no start()
 
+        # Segundos que sendall() pode esperar um cliente de VÍDEO drenar
+        # antes de considerá-lo travado -- ver accept_connections.
+        self.video_send_timeout = 3.0
+
         # pipe para encerrar select sem travar
         self.stop_pipe_r, self.stop_pipe_w = socket.socketpair()
         self.stop_pipe_r.setblocking(False)
@@ -113,7 +117,45 @@ class TCPServer:
                             continue
 
                         client_socket, addr = s.accept()
-                        client_socket.setblocking(False)
+                        if self.read_enabled:
+                            client_socket.setblocking(False)
+                        else:
+                            # VÍDEO: socket BLOQUEANTE com timeout, não
+                            # não-bloqueante.
+                            #
+                            # BUG REAL: sendall() num socket não-bloqueante
+                            # é quebrado por construção -- quando o buffer
+                            # de saída do kernel enche no meio do pacote,
+                            # send() levanta BlockingIOError com parte dos
+                            # bytes JÁ escritos e sem dizer quantos. O
+                            # `except OSError` de send_to_all_client
+                            # (BlockingIOError é subclasse) chamava
+                            # _remove_client e derrubava o cliente no meio
+                            # de um quadro. Em uso real isso saiu como,
+                            # três vezes numa mesma calibração:
+                            #   "11859 bytes read on a total of 12965 expected"
+                            # sempre perto do FIM do quadro, sempre depois
+                            # de movimento grande ou troca de câmera (cena
+                            # nova = JPEG maior).
+                            #
+                            # O caminho de COMANDO nunca sofreu porque as
+                            # mensagens cabem num write só; o de vídeo
+                            # manda 10-40KB por quadro a 15fps, por WiFi
+                            # (server.py faz bind em wlan0).
+                            #
+                            # Não dá pra só ignorar a falha e seguir: o
+                            # protocolo é prefixo-de-tamanho + dados, então
+                            # um envio parcial dessincroniza o stream
+                            # inteiro. Ou completa, ou fecha. Com timeout,
+                            # só fecha se o cliente estiver parado por
+                            # segundos de verdade -- aí fechar É o certo.
+                            #
+                            # O recv() de detecção de desconexão (mais
+                            # abaixo, no ramo not read_enabled) continua
+                            # retornando na hora: select() só marca o
+                            # socket como legível quando há o que ler,
+                            # então o timeout nunca entra em jogo ali.
+                            client_socket.settimeout(self.video_send_timeout)
                         self.client_sockets[client_socket] = addr
                         self.active_connections += 1
                         print(f"New connection from {addr}, {self.active_connections} active.")

@@ -314,10 +314,18 @@ class CameraManager:
         tipo_anterior = self.active_camera_type
         print(f"🔁 Alternando câmera para {camera_type.value.upper()}")
         self.switching = True
-        with self.frame_lock:
-            self.frame = None
-            self.last_good_frame = None
         try:
+            # ACHADO EM USO REAL: sem isto, get_frame() devolve
+            # last_good_frame durante e logo depois da troca -- que é um
+            # quadro da câmera ANTIGA. O cliente recebe JPEG válido, o
+            # modelo de visão descreve com confiança, e a cena é de outra
+            # câmera. Guardar o último quadro bom é o certo pra soluço
+            # momentâneo e o errado exatamente aqui, que é o único ponto
+            # onde o quadro velho passa a ser de outra fonte.
+            with self.frame_lock:
+                self.frame = None
+                self.last_good_frame = None
+
             with self.cap_lock:
                 # fecha tudo antes de abrir
                 self._close_opencv()

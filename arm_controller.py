@@ -37,37 +37,55 @@ class ArmController:
         }
 
         self.smooth_step = 2
+
+        # Por que o último set_angle() não moveu, quando não moveu.
+        # Lido por eva_robot.arm_set_angle e propagado até a EVA: "ok"
+        # idêntico pra "movi" e pra "já estava lá" fazia quatro comandos
+        # seguidos parecerem bem-sucedidos sem um grau de movimento.
         self.ultimo_motivo = "ok"
 
         print("🦾 ArmController (0..3) inicializado")
-
-    def _limite_canal(self, channel: int) -> Tuple[int, int]:
-        """safety.validate_servo_command (regra 2) libera a cabeça até
-        180° quando o pitch está <= 50°. Este clamp não sabia disso e
-        cortava calado em 117 -- safety APROVAVA 150°, set_angle
-        devolvia True, o servidor respondia ok, e do lado da EVA parecia
-        que a cabeça tinha ido pra onde ela pediu."""
-        lo, hi = self.limits[channel]
-        if channel == 3 and self.current_angles.get(1, 90) <= 50:
-            hi = 180
-        return lo, hi
 
     def move_to_home(self):
         for ch in (0, 1, 2, 3):
             self.set_angle(ch, 90, smooth=True)
         time.sleep(0.2)
 
+    def _limite_canal(self, channel: int) -> Tuple[int, int]:
+        """Limite efetivo do canal, já com as exceções condicionais.
+
+        safety.validate_servo_command (regra 2) libera a cabeça até 180°
+        quando o pitch está <= 50° -- a interferência mecânica que impõe
+        o teto de 117 some quando o braço está baixo. Este clamp não
+        sabia disso e cortava calado em 117: safety APROVAVA 150°,
+        set_angle devolvia True, o servidor respondia "ok", e do lado da
+        EVA parecia que a cabeça tinha ido pra onde ela pediu.
+
+        As duas cópias de limite continuam existindo de propósito (ver
+        self.limits acima) -- o que muda é que agora elas concordam."""
+        lo, hi = self.limits[channel]
+        if channel == 3 and self.current_angles.get(1, 90) <= 50:
+            hi = 180
+        return lo, hi
+
     def set_angle(self, channel: int, angle: int, smooth: bool = False) -> bool:
         if channel not in self.limits:
             print(f"⚠️ Canal inválido: {channel}")
+            self.ultimo_motivo = "canal inválido"
             return False
 
         lo, hi = self._limite_canal(channel)
-        angle = max(lo, min(hi, int(angle)))
+        pedido = int(angle)
+        angle = max(lo, min(hi, pedido))
+        if angle != pedido:
+            self.ultimo_motivo = f"pedido {pedido}° cortado para {angle}° (limite {lo}-{hi})"
+        else:
+            self.ultimo_motivo = "ok"
 
         current = self.current_angles.get(channel, 90)
         if abs(angle - current) < 2:
-            self.ultimo_motivo = "já estava nessa posição"
+            # True porque não há falha nenhuma -- só não há nada a fazer.
+            self.ultimo_motivo = f"já estava em {current}°"
             return True
 
         if smooth:
@@ -79,10 +97,8 @@ class ArmController:
             # robot_core.Servo espera channel como string ('0'..)
             self.servo.set_servo_pwm(str(channel), angle)
             self.current_angles[channel] = angle
-            self.ultimo_motivo = "ok"
             return True
         except Exception as e:
-            self.ultimo_motivo = f"falha de hardware: {e}"
             print(f"❌ Erro servo {channel}: {e}")
             return False
 
