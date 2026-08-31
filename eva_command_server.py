@@ -131,6 +131,12 @@ class EVACommandServer:
                 max_clients=6,
                 listen_count=6,
             )
+            # O watchdog precisa saber se ainda há alguém conectado --
+            # sem isso ele dispara estop de escopo total a cada 5s com o
+            # robô ocioso, e o reset pelo dashboard não sobrevive nem até
+            # o próximo comando. Ver EVARobot._watchdog_loop.
+            self.robot.ha_cliente_conectado = self.server.is_command_server_connected
+
             print(f"✅ Servidor TCP iniciado em {self.server.ip_address}:{command_port} "
                   f"(vídeo: {video_port})")
         except Exception as e:

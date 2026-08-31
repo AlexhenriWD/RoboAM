@@ -52,7 +52,7 @@ import sys
 import threading
 import time
 from enum import Enum
-from typing import Optional
+from typing import Callable, Optional
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -114,6 +114,11 @@ class EVARobot:
         # Ver heartbeat()/_watchdog_loop -- watchdog só passa a exigir
         # heartbeat regular DEPOIS que o primeiro chegou de verdade.
         self._recebeu_primeiro_heartbeat = False
+        # Preenchido por quem tem o servidor TCP (eva_command_server.start)
+        # -- devolve True se há algum cliente de comando conectado.
+        # Necessário porque EVARobot não conhece o servidor por desenho, e
+        # o watchdog precisa dessa informação: ver _watchdog_loop.
+        self.ha_cliente_conectado: Optional[Callable[[], bool]] = None
 
         # Inversão de motores (ajuste se necessário)
         self.invert_left = -1
@@ -187,11 +192,41 @@ class EVARobot:
         watchdog existe pra proteger contra."""
         while self.running:
             try:
-                if self._recebeu_primeiro_heartbeat:
+                if not self._recebeu_primeiro_heartbeat:
+                    pass  # ninguém conectou ainda -- ver docstring
+                elif self._sem_cliente_conectado():
+                    # SEGUNDO BURACO, achado depois: a flag de primeiro
+                    # heartbeat nunca volta pra False quando o cliente
+                    # DESCONECTA. Uma sessão da EVA deixava a flag ligada
+                    # pra sempre; a partir daí, com o robô parado e
+                    # ninguém conectado, o watchdog disparava estop de
+                    # escopo TOTAL a cada 5s -- e o reset pelo dashboard
+                    # era desfeito antes de qualquer comando chegar.
+                    #
+                    # "Ninguém está conectado" não é falha: watchdog
+                    # protege contra o cliente sumir NO MEIO de um
+                    # comando. Sem cliente não há operador que possa ter
+                    # sumido. Mesma lógica do guard de primeiro heartbeat,
+                    # só que para o fim da sessão em vez do começo.
+                    #
+                    # O reset() aqui é o detalhe que importa: sem ele, um
+                    # cliente conectando depois de dez minutos de robô
+                    # ocioso levaria estop no primeiro segundo, por um
+                    # atraso que aconteceu antes de ele existir.
+                    self.safety.watchdog.reset()
+                else:
                     self.safety.watchdog.check()
             except Exception as e:
                 print(f"⚠️ erro no watchdog loop: {e}")
             time.sleep(0.5)
+
+    def _sem_cliente_conectado(self) -> bool:
+        if self.ha_cliente_conectado is None:
+            return False  # sem informação: mantém a proteção ligada
+        try:
+            return not self.ha_cliente_conectado()
+        except Exception:
+            return False
 
     def _sensor_loop(self):
         """Lê ultrassônico sempre, e bateria via ADC quando disponível,
