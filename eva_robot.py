@@ -194,6 +194,29 @@ class EVARobot:
             try:
                 if not self._recebeu_primeiro_heartbeat:
                     pass  # ninguém conectou ainda -- ver docstring
+                elif not self._motores_em_movimento():
+                    # TERCEIRO buraco, e o mais importante: "cliente
+                    # conectado" NÃO é o mesmo que "alguém supervisionando
+                    # um movimento". Várias ferramentas conectam só pra ler
+                    # estado (ver_camera_robo.py, o dashboard, o próprio
+                    # testar_cabeca.py entre uma pose e outra) e nunca
+                    # mandam heartbeat -- e com max_clients=6 basta UMA
+                    # conexão silenciosa pra armar o watchdog e derrubar
+                    # tudo em 5s, como aconteceu:
+                    #
+                    #   New connection from ('192.168.100.5', 50807)
+                    #   🚨 EMERGENCY STOP: Watchdog timeout (10.4s)
+                    #
+                    # O watchdog protege contra UMA coisa: o operador
+                    # sumir com o robô ANDANDO. Robô parado que perde
+                    # contato não é emergência -- ele já está parado. E o
+                    # estop que isso disparava travava os servos, o reset
+                    # do dashboard e a calibração inteira junto.
+                    #
+                    # Mantém o relógio zerado enquanto está parado, pra
+                    # que o primeiro movimento comece com os 5s inteiros
+                    # em vez de herdar o tempo em que ninguém falou nada.
+                    self.safety.watchdog.reset()
                 elif self._sem_cliente_conectado():
                     # SEGUNDO BURACO, achado depois: a flag de primeiro
                     # heartbeat nunca volta pra False quando o cliente
@@ -219,6 +242,17 @@ class EVARobot:
             except Exception as e:
                 print(f"⚠️ erro no watchdog loop: {e}")
             time.sleep(0.5)
+
+    def _motores_em_movimento(self) -> bool:
+        """True se algum motor está com PWM diferente de zero.
+
+        Movimento de SERVO não conta de propósito: um braço parado numa
+        pose é inerte, enquanto um chassi rolando sem supervisão é o
+        cenário que o watchdog existe pra cortar."""
+        try:
+            return bool(STATE.get_state().is_moving)
+        except Exception:
+            return True  # na dúvida, mantém a proteção ligada
 
     def _sem_cliente_conectado(self) -> bool:
         if self.ha_cliente_conectado is None:
