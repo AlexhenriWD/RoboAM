@@ -65,6 +65,8 @@ class CameraManager:
         self.running = False
         self.switching = False
         self.thread: Optional[threading.Thread] = None
+        # Throttle do log de erro da picam -- ver _capture_loop.
+        self._ultimo_log_erro_picam = 0.0
 
         print("📷 CameraManager inicializado")
 
@@ -320,7 +322,7 @@ class CameraManager:
             # quadro da câmera ANTIGA. O cliente recebe JPEG válido, o
             # modelo de visão descreve com confiança, e a cena é de outra
             # câmera. Guardar o último quadro bom é o certo pra soluço
-            # momentâneo e o errado exatamente aqui, que é o único ponto
+            # momentâneo, e o errado exatamente aqui -- o único ponto
             # onde o quadro velho passa a ser de outra fonte.
             with self.frame_lock:
                 self.frame = None
@@ -410,10 +412,31 @@ class CameraManager:
             with self.cap_lock:
                 if self.active_camera_type == CameraType.PICAM and self.picam2_started and self.picam2 is not None:
                     try:
-                        frame = self.picam2.capture_array()  # RGB
-                        # Picamera2 -> vem RGB; OpenCV espera BGR para putText/encode:
-                        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                    except Exception:
+                        frame = self.picam2.capture_array()
+                        # Picamera2 configurado como "RGB888" pode entregar
+                        # 3 OU 4 canais dependendo da versão do libcamera
+                        # (XRGB8888, com alfa). cv2.COLOR_RGB2BGR estoura
+                        # em 4 canais, e a exceção era engolida logo
+                        # abaixo: _open_picam2 dava certo (o warmup captura
+                        # antes deste caminho existir), o log dizia
+                        # "picam2_iniciado=True", e mesmo assim NENHUM
+                        # quadro saía -- a recuperação automática voltava
+                        # pra USB e a sessão inteira rodava com a câmera
+                        # fixa do corpo achando que era a da cabeça.
+                        if frame is not None and frame.ndim == 3 and frame.shape[2] == 4:
+                            frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                        else:
+                            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    except Exception as e:
+                        # NUNCA engolir calado: "sem frame" sem motivo é
+                        # indistinguível de câmera desconectada, e custou
+                        # uma sessão inteira de diagnóstico. Throttle pra
+                        # não inundar o terminal a 15fps.
+                        agora = time.time()
+                        if agora - self._ultimo_log_erro_picam > 5.0:
+                            self._ultimo_log_erro_picam = agora
+                            print(f"❌ picam2.capture_array falhou: "
+                                  f"{type(e).__name__}: {e}")
                         frame = None
                 else:
                     cap = self.cap

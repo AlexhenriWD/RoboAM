@@ -110,6 +110,26 @@ class SafetyController:
         self.enabled = True
         self.emergency_stop_active = False
         self.safety_level = SafetyLevel.NORMAL
+
+        # ESCOPO do emergency stop ativo. Nem todo motivo de parada é o
+        # mesmo tipo de parada:
+        #
+        #   servos_bloqueados=True   "pare de operar" -- painel, bateria
+        #                            crítica, watchdog. Trava tudo.
+        #   servos_bloqueados=False  "não dirija por aí" -- ultrassom.
+        #                            Trava as rodas, deixa a cabeça livre.
+        #
+        # BUG REAL que isto fecha: o ultrassom mede o que está na frente
+        # do CHASSI, e disparava um estop que também bloqueava
+        # validate_servo_command. Com o robô parado em cima de uma mesa
+        # com uma parede a 8cm, a EVA ficou uma sessão inteira sem poder
+        # mexer a cabeça -- e como o obstáculo não sai da frente sozinho,
+        # o ciclo reset/estop repetia indefinidamente. Girar a câmera não
+        # aproxima o robô de nada; não havia razão física pro bloqueio.
+        self.servos_bloqueados = True
+        # Por que o estop atual foi acionado, pra saber se pode sair
+        # sozinho quando a condição passar (só o de obstáculo pode).
+        self.motivo_estop: Optional[str] = None
         
         # Warnings
         self.warnings = deque(maxlen=100)
@@ -155,7 +175,9 @@ class SafetyController:
                 # Obstáculo muito próximo
                 if distance < CONFIG.safety.EMERGENCY_STOP_DISTANCE:
                     self.trigger_emergency_stop(
-                        f"Obstáculo crítico: {distance:.1f}cm"
+                        f"Obstáculo crítico: {distance:.1f}cm",
+                        bloqueia_servos=False,
+                        motivo_tipo="obstaculo",
                     )
                     return False, f"Obstáculo muito próximo ({distance:.1f}cm)"
                 
@@ -201,7 +223,10 @@ class SafetyController:
         if not self.enabled:
             return True, "Safety desabilitado"
 
-        if self.emergency_stop_active:
+        # Só bloqueia servo quando o estop é do tipo "pare de operar".
+        # Estop de obstáculo (ultrassom) trava as rodas e deixa a cabeça
+        # livre -- ver self.servos_bloqueados no __init__.
+        if self.emergency_stop_active and self.servos_bloqueados:
             return False, "EMERGENCY STOP ativo"
 
         # ===============================
@@ -316,7 +341,11 @@ class SafetyController:
                 # no dashboard. Agora o monitoramento contínuo (chamado a
                 # cada CONFIG.sensors.SENSOR_READ_INTERVAL, não só a cada
                 # comando) para de verdade assim que vê a leitura crítica.
-                self.trigger_emergency_stop(f"Obstáculo crítico: {distance:.1f}cm")
+                self.trigger_emergency_stop(
+                    f"Obstáculo crítico: {distance:.1f}cm",
+                    bloqueia_servos=False,
+                    motivo_tipo="obstaculo",
+                )
             elif distance < CONFIG.safety.MIN_OBSTACLE_DISTANCE:
                 self.add_warning(
                     SafetyLevel.WARNING,
@@ -324,12 +353,36 @@ class SafetyController:
                     sensor="ultrasonic",
                     value=distance
                 )
+
+            # Sai sozinho do estop de obstáculo quando o caminho abre.
+            #
+            # HISTERESE de propósito: entra em EMERGENCY_STOP_DISTANCE
+            # (10cm) e só sai em MIN_OBSTACLE_DISTANCE (15cm). Com um
+            # único limiar, uma leitura oscilando em torno dele faria o
+            # robô entrar e sair de emergência várias vezes por segundo.
+            #
+            # Só o estop de obstáculo se limpa sozinho: ele responde a uma
+            # condição do mundo que o próprio sensor consegue desfazer
+            # (o obstáculo saiu, ou alguém moveu o robô). Painel, bateria
+            # e watchdog continuam exigindo reset explícito -- nenhum dos
+            # três "passa" só porque a leitura seguinte foi melhor.
+            elif (self.emergency_stop_active
+                    and self.motivo_estop == "obstaculo"
+                    and distance >= CONFIG.safety.MIN_OBSTACLE_DISTANCE):
+                self.emergency_stop_active = False
+                self.servos_bloqueados = True
+                self.motivo_estop = None
+                self.safety_level = SafetyLevel.NORMAL
+                self.watchdog.reset()
+                print(f"✅ Caminho livre ({distance:.1f}cm) -- saindo do estop de obstáculo")
     
     # ========================================
     # EMERGENCY STOP
     # ========================================
     
-    def trigger_emergency_stop(self, reason: str):
+    def trigger_emergency_stop(self, reason: str, *,
+                               bloqueia_servos: bool = True,
+                               motivo_tipo: Optional[str] = None):
         """
         Aciona parada de emergência
 
@@ -347,10 +400,20 @@ class SafetyController:
         "desligar tudo" -- trocar por stop_motors() (só motor) é o que
         faz reset_emergency_stop() significar o que o nome diz.
         """
+        # Um estop mais restritivo SOBREPÕE um mais permissivo já ativo.
+        # Sem isto, um estop de obstáculo (servos livres) já ativo faria o
+        # `return` engolir um estop de bateria crítica logo depois, e os
+        # servos continuariam liberados com a bateria no fim.
         if self.emergency_stop_active:
+            if bloqueia_servos and not self.servos_bloqueados:
+                self.servos_bloqueados = True
+                self.motivo_estop = motivo_tipo
+                print(f"\n🚨 ESCALANDO PARADA: {reason} (servos também travados)\n")
             return  # Já ativo
         
         self.emergency_stop_active = True
+        self.servos_bloqueados = bloqueia_servos
+        self.motivo_estop = motivo_tipo
         self.safety_level = SafetyLevel.EMERGENCY
         
         # Parar motores -- NÃO o robô inteiro (câmera/threads continuam
@@ -368,7 +431,8 @@ class SafetyController:
             sensor="system"
         )
         
-        print(f"\n🚨 PARADA DE EMERGÊNCIA: {reason}\n")
+        escopo = "tudo travado" if bloqueia_servos else "rodas travadas, cabeça livre"
+        print(f"\n🚨 PARADA DE EMERGÊNCIA: {reason} ({escopo})\n")
     
     def reset_emergency_stop(self) -> bool:
         """
@@ -388,6 +452,8 @@ class SafetyController:
             return False
         
         self.emergency_stop_active = False
+        self.servos_bloqueados = True
+        self.motivo_estop = None
         self.safety_level = SafetyLevel.NORMAL
         self.watchdog.reset()
         
@@ -502,6 +568,11 @@ class SafetyController:
         return {
             'enabled': self.enabled,
             'emergency_stop': self.emergency_stop_active,
+            # Quem lê o estado precisa saber se a cabeça ainda responde --
+            # 'emergency_stop: true' sozinho fazia parecer que o robô
+            # estava inteiramente parado quando só as rodas estavam.
+            'servos_bloqueados': self.servos_bloqueados,
+            'motivo_estop': self.motivo_estop,
             'level': self.safety_level.value,
             'watchdog_ok': self.watchdog.check(),
             'recent_warnings': len(self.get_recent_warnings()),
