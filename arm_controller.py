@@ -31,7 +31,12 @@ class ArmController:
         self.limits: Dict[int, Tuple[int, int]] = {
             0: (0, 90),    # yaw / base -- confirmado, NÃO vai até 180
             1: (40, 110),  # pitch / ombro -- confirmado fisicamente
-            2: (90, 180),  # cotovelo
+            2: (90, 170),  # cotovelo -- 170, não 180: 165/170 foram
+                           # verificados fisicamente com a base lateral;
+                           # acima disso não há observação nenhuma. E a
+                           # combinação cotovelo alto + base de frente
+                           # estica o flat CSI (safety, regra do cabo) --
+                           # esse limite é condicional e vive lá, não aqui.
             3: (0, 117),   # cabeça -- baseline conservador; safety.py relaxa
                            # até 180 quando pitch<=50, este clamp não (ver nota)
         }
@@ -114,18 +119,22 @@ class ArmController:
 
         return self._move_direct(channel, target)
 
-    # Helpers “humanos”
-    def look_left(self, degrees: int = 30):
-        return self.set_angle(0, 90 - degrees)
-
-    def look_right(self, degrees: int = 30):
-        return self.set_angle(0, 90 + degrees)
-
-    def look_up(self, degrees: int = 20):
-        return self.set_angle(1, self.current_angles[1] - degrees)
-
-    def look_down(self, degrees: int = 20):
-        return self.set_angle(1, self.current_angles[1] + degrees)
+    # APAGADOS: look_left/look_right/look_up/look_down.
+    #
+    # Os quatro mentiam sobre o que faziam, e nenhum estava no caminho da
+    # EVA (que passa por safety + eva_robot.arm_set_angle):
+    #
+    #   look_right(30) calculava 90+30=120, era clampado pelo limite
+    #                  (0,90) e não movia UM GRAU. Código morto que
+    #                  sugeria um curso que não existe.
+    #   look_up/down   invertidos. Confirmado por foto na calibração:
+    #                  pitch MAIOR aponta mais alto e mais à frente
+    #                  (cotovelo 120 com pitch 110 olha pra frente; com
+    #                  pitch 70 olha pra trás e pra baixo). look_up fazia
+    #                  current - graus, ou seja, olhava pra baixo.
+    #
+    # Helper de conveniência com nome mentiroso é armadilha esperando --
+    # melhor não existir que existir errado.
 
     def look_center(self):
         self.set_angle(0, 90)

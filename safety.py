@@ -12,6 +12,29 @@ from enum import Enum
 
 from hardware_config import CONFIG
 
+# ===========================================================================
+# LIMITES DO CABO DA PICAM
+#
+# O flat CSI sobe da picam, atravessa o braço e desce até o Pi. Ele é o
+# que limita este robô -- não os servos, que iriam bem além.
+#
+#   YAW_FRENTE  = 90   base apontando pra frente do carro (repouso)
+#   YAW_LATERAL = 0    base virada pra DIREITA de quem olha o robô
+#
+# Nomeados aqui e derivados em todo o resto de propósito: o servo da
+# base já foi remontado uma vez, e nessa hora é melhor ter dois números
+# num lugar só do que ângulos crus espalhados por quatro arquivos.
+# ===========================================================================
+YAW_FRENTE = 90
+YAW_LATERAL = 0
+
+# A partir deste cotovelo o cabo estica, SE a base não estiver lateral.
+COTOVELO_ESTICA_CABO = 160
+# Yaw máximo ainda seguro com o cotovelo acima do limite acima.
+# Conservador: 0 foi testado e é seguro, 90 é proibido; entre os dois não
+# há medição, e 30 é o palpite informado do dono do hardware.
+YAW_CABO_SEGURO = 30
+
 
 # ============================================================================
 # TIPOS E ENUMS
@@ -252,6 +275,7 @@ class SafetyController:
             arm = self.robot.arm.current_angles
             elbow = arm.get(2, 90)
             pitch = arm.get(1, 90)
+            yaw = arm.get(0, 90)   # regra do cabo da picam, abaixo
         except Exception:
             # Falha ao ler estado → não movimenta
             return False, "Estado do braço indisponível"
@@ -260,13 +284,40 @@ class SafetyController:
         # REGRAS ESPECIAIS (calibração real)
         # ===============================
 
-        # 1) Cotovelo em posição crítica (>=160°): trava TODOS os
-        # outros eixos, sem exceção -- política explícita, não é um
-        # teto de ângulo isolado por canal. Precisa vir ANTES de
-        # qualquer outra regra condicional (yaw, cabeça), senão elas
-        # nunca são alcançadas quando o cotovelo está crítico.
-        if elbow >= 160 and channel != 2:
-            return False, "Cotovelo em posição crítica -- outros eixos travados"
+        # 1) REGRA DO CABO DA PICAM.
+        #
+        # NÃO é cinemática do braço, apesar do nome que esta regra tinha
+        # antes ("cotovelo em posição crítica"). É o flat CSI: com o
+        # cotovelo alto E a base apontando pra FRENTE, o cabo que sobe da
+        # picam até o Pi estica além do que aguenta.
+        #
+        # Isso importa porque o dano é CUMULATIVO E INVISÍVEL -- o cabo
+        # não quebra na hora; começa a falhar de forma intermitente
+        # semanas depois, e a procura vai parar no software.
+        #
+        # Com a base lateral (yaw <= YAW_CABO_SEGURO) o braço sobe sobre
+        # ar livre e o cabo tem folga -- confirmado fisicamente com
+        # cotovelo em 165/170 e yaw 0, sem tensão e sem colisão.
+        #
+        # A versão antiga desta regra travava pitch/cabeça e deixava o
+        # CANAL 2 passar sempre (`channel != 2`). Isso era o pior dos
+        # dois mundos: não impedia a combinação que danifica o cabo (o
+        # cotovelo subia igual, confirmado em uso real chegando a 175°) e
+        # ainda paralisava a EVA na postura mais útil que este corpo tem
+        # -- ela chegava na altura de um rosto e congelava, sem conseguir
+        # virar pra ninguém.
+        #
+        # Bloqueia nos DOIS sentidos de propósito: subir o cotovelo com a
+        # base de frente, E girar a base pra frente com o cotovelo já
+        # alto. Barrar só um lado deixaria a mesma combinação acessível
+        # pelo outro caminho -- foi assim que o 175° passou.
+        if channel == 2 and angle >= COTOVELO_ESTICA_CABO and yaw > YAW_CABO_SEGURO:
+            return False, (f"Cotovelo {angle}° com a base em {yaw}° estica o cabo "
+                           f"da picam -- gire a base para <= {YAW_CABO_SEGURO}° antes")
+
+        if channel == 0 and angle > YAW_CABO_SEGURO and elbow >= COTOVELO_ESTICA_CABO:
+            return False, (f"Girar a base para {angle}° com o cotovelo em {elbow}° "
+                           f"estica o cabo da picam -- recolha o cotovelo antes")
 
         # 2) Cabeça (canal 3): teto normal 117°, mas com pitch baixo
         # (<=50°) há curso livre a mais -- até 180°. Tem que checar
