@@ -463,15 +463,28 @@ class SafetyController:
     def _check_safe_to_reset(self) -> tuple[bool, str]:
         """Verifica se é seguro resetar emergency stop"""
         
-        # Verificar bateria
+        # Bateria crítica IMPEDE: ali o reset seria fingimento -- a
+        # condição não passa sozinha e não há escopo reduzido que ajude.
         battery_v = self.last_sensor_data.get('battery_v')
         if battery_v and battery_v < CONFIG.safety.CRITICAL_BATTERY_VOLTAGE:
             return False, f"Bateria ainda crítica: {battery_v:.1f}V"
         
-        # Verificar obstáculos
+        # Obstáculo NÃO impede mais -- DEADLOCK REAL que isto fecha:
+        # o obstáculo bloqueava o reset de QUALQUER estop, inclusive dos
+        # que não têm nada a ver com ele. Com o robô parado em cima de
+        # uma mesa com uma parede a 8cm, um estop de WATCHDOG ficava
+        # impossível de resetar pelo dashboard, para sempre, e só
+        # reiniciar o processo resolvia -- a mesa não sai da frente.
+        #
+        # Se o obstáculo continuar lá depois do reset, update_sensor_data
+        # dispara em seguida um estop de OBSTÁCULO, que trava só as rodas
+        # e deixa a cabeça livre (ver servos_bloqueados). Estado correto e
+        # recuperável, contra um deadlock que não era nem uma coisa nem
+        # outra.
         distance = self.last_sensor_data.get('ultrasonic_cm')
         if distance and distance < CONFIG.safety.EMERGENCY_STOP_DISTANCE:
-            return False, f"Obstáculo ainda presente: {distance:.1f}cm"
+            print(f"ℹ️  resetando com obstáculo a {distance:.1f}cm -- as rodas devem "
+                  f"voltar pro estop de obstáculo em seguida; a cabeça não")
         
         return True, "OK"
     
@@ -571,7 +584,15 @@ class SafetyController:
             # Quem lê o estado precisa saber se a cabeça ainda responde --
             # 'emergency_stop: true' sozinho fazia parecer que o robô
             # estava inteiramente parado quando só as rodas estavam.
-            'servos_bloqueados': self.servos_bloqueados,
+            #
+            # Reportado como estado EFETIVO, não como o atributo cru:
+            # self.servos_bloqueados é o ESCOPO do estop e vale True em
+            # repouso (é o escopo padrão do próximo estop). Publicar o
+            # atributo direto fazia um robô perfeitamente livre reportar
+            # 'servos_bloqueados: true, motivo_estop: null' -- travado
+            # por um estop que não existe. Aqui o campo significa o que o
+            # nome diz: os servos estão bloqueados NESTE MOMENTO.
+            'servos_bloqueados': self.emergency_stop_active and self.servos_bloqueados,
             'motivo_estop': self.motivo_estop,
             'level': self.safety_level.value,
             'watchdog_ok': self.watchdog.check(),
